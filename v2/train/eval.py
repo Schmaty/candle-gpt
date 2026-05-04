@@ -218,3 +218,7 @@ def write_report(metrics: dict, run_dir: Path) -> None:
     report_path = run_dir / "REPORT.md"
     report_path.write_text("\n".join(lines), encoding="utf-8")
     log.info(f"Report written: {report_path}")
+    import json as _json
+    json_path = run_dir / "metrics.json"
+    json_path.write_text(_json.dumps(metrics, indent=2), encoding="utf-8")
+    log.info(f"Metrics JSON: {json_path}")
