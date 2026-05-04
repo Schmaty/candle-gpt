@@ -44,7 +44,11 @@ const inputStyle: React.CSSProperties = {
 export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
   const [temperature, setTemperature] = useState(1.0)
   const [horizon, setHorizon] = useState(30)
-  const [zThreshold, setZThreshold] = useState(0.05)
+  // Default 0 — this model's z-scores are tiny (it was trained for ~22k of
+  // 200k planned steps), so anything above ~0.02 filters out every window
+  // and the backtest takes 0 trades. Start at 0 (always-on) and the user
+  // can dial up to find a confidence threshold that actually fires.
+  const [zThreshold, setZThreshold] = useState(0.0)
   const [feeBps, setFeeBps] = useState(1.0)
   const [startFrac, setStartFrac] = useState(0)
   const [endFrac, setEndFrac] = useState(1)
@@ -127,6 +131,11 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
           standardized expected return over <strong>horizon</strong> bars, then takes a long if z &gt; threshold,
           short if z &lt; −threshold, otherwise flat. PnL is the actual cumulative log return over the
           horizon, minus 2 × fee on round-trip.
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 12, padding: '8px 12px', background: '#0e1620', border: '1px solid #1c2230', borderRadius: 4 }}>
+          <strong style={{ color: 'var(--fg)' }}>Heads up:</strong> this model's z-scores are very small (it was trained for ~22k of 200k planned steps).
+          Use <code style={{ fontFamily: 'var(--font-mono)', color: '#00d4aa' }}>z_threshold = 0</code> to take a position on every window, then dial up to filter for higher-conviction signals.
+          A threshold of 0.05+ will give you 0 trades on this model.
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr) auto', gap: 12, alignItems: 'end' }}>
           <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
