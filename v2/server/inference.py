@@ -121,12 +121,41 @@ class V2InferenceModel:
             top5_idx = np.argsort(probs)[::-1][:5]
             top5_rets = self.tokenizer.decode(top5_idx).tolist()
             top5_probs = probs[top5_idx].tolist()
+            # Bin centers for the full distribution (decoded return per bin).
+            bin_centers = self.tokenizer.decode(np.arange(self.tokenizer.n_bins)).tolist()
+            bin_centers_arr = np.asarray(bin_centers)
+            # Directional summary: flat = |return| < 0.01% (1 bps).
+            FLAT_EPS = 1e-4
+            mask_up = bin_centers_arr > FLAT_EPS
+            mask_down = bin_centers_arr < -FLAT_EPS
+            mask_flat = ~(mask_up | mask_down)
+            p_up = float(probs[mask_up].sum())
+            p_down = float(probs[mask_down].sum())
+            p_flat = float(probs[mask_flat].sum())
+            expected_ret = float((probs * bin_centers_arr).sum())
+            # Shannon entropy in bits and as a fraction of max (for "confidence").
+            entropy_bits = float(-(probs * np.log2(np.clip(probs, 1e-12, 1.0))).sum())
+            max_entropy_bits = float(np.log2(self.tokenizer.n_bins))
+            confidence = max(0.0, 1.0 - entropy_bits / max_entropy_bits)  # 0..1
+            last_close = float(window_candles[-1]["close"])
+            expected_close = last_close * float(np.exp(expected_ret))
             return {
                 "candles": chart_candles,
                 "prediction": {
                     "probs": probs.tolist(),
                     "top5_rets": top5_rets,
                     "top5_probs": top5_probs,
+                    "bin_centers": bin_centers,
+                    "p_up": p_up,
+                    "p_down": p_down,
+                    "p_flat": p_flat,
+                    "flat_eps": FLAT_EPS,
+                    "expected_ret": expected_ret,
+                    "expected_close": expected_close,
+                    "last_close": last_close,
+                    "entropy_bits": entropy_bits,
+                    "max_entropy_bits": max_entropy_bits,
+                    "confidence": confidence,
                 },
             }
         except Exception as e:
