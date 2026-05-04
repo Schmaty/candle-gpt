@@ -6,6 +6,7 @@ import { HistoryPage } from './pages/HistoryPage'
 import { CalibrationPage } from './pages/CalibrationPage'
 import { RegimePage } from './pages/RegimePage'
 import { EquityPage } from './pages/EquityPage'
+import { BacktestPage, type BacktestSeed } from './pages/BacktestPage'
 import { fetchStatus } from './api'
 
 const TABS = [
@@ -13,6 +14,7 @@ const TABS = [
   { id: 'live',        label: 'Live' },
   { id: 'history',     label: 'History' },
   { id: 'calibration', label: 'Calibration' },
+  { id: 'backtest',    label: 'Backtest' },
   { id: 'regimes',     label: 'Regimes' },
   { id: 'equity',      label: 'Equity' },
 ]
@@ -20,10 +22,16 @@ const TABS = [
 export default function App() {
   const [activeTab, setActiveTab] = useState('training')
   const [status, setStatus] = useState<any>(null)
+  const [backtestSeed, setBacktestSeed] = useState<BacktestSeed | null>(null)
 
   useEffect(() => {
     fetchStatus().then(setStatus).catch(console.error)
   }, [])
+
+  const sendToBacktest = (seed: BacktestSeed) => {
+    setBacktestSeed(seed)
+    setActiveTab('backtest')
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
@@ -42,7 +50,8 @@ export default function App() {
         {activeTab === 'training'    && <TrainingPage />}
         {activeTab === 'live'        && <LivePage />}
         {activeTab === 'history'     && <HistoryPage />}
-        {activeTab === 'calibration' && <CalibrationPage />}
+        {activeTab === 'calibration' && <CalibrationPage onUseInBacktest={sendToBacktest} />}
+        {activeTab === 'backtest'    && <BacktestPage seed={backtestSeed} />}
         {activeTab === 'regimes'     && <RegimePage />}
         {activeTab === 'equity'      && <EquityPage />}
       </main>

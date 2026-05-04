@@ -41,3 +41,26 @@ export async function getTrainingEvents(afterTs: number | null = null) {
   if (!r.ok) throw new Error(`training/events: ${r.status}`)
   return r.json()
 }
+export async function runSweep(temperatures: number[], horizons: number[], nSamples: number) {
+  const t = temperatures.join(',')
+  const h = horizons.join(',')
+  const r = await fetch(`${BASE}/calibration/sweep?temperatures=${t}&horizons=${h}&n_samples=${nSamples}`)
+  if (!r.ok) throw new Error(`sweep: ${r.status} ${await r.text()}`)
+  return r.json()
+}
+export async function runBacktest(opts: {
+  temperature: number; horizon: number; z_threshold: number;
+  start_frac?: number; end_frac?: number; fee_bps?: number;
+}) {
+  const params = new URLSearchParams({
+    temperature: String(opts.temperature),
+    horizon: String(opts.horizon),
+    z_threshold: String(opts.z_threshold),
+    start_frac: String(opts.start_frac ?? 0),
+    end_frac: String(opts.end_frac ?? 1),
+    fee_bps: String(opts.fee_bps ?? 1.0),
+  })
+  const r = await fetch(`${BASE}/backtest?${params}`)
+  if (!r.ok) throw new Error(`backtest: ${r.status} ${await r.text()}`)
+  return r.json()
+}

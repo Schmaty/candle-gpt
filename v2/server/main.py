@@ -12,15 +12,21 @@ from fastapi.responses import FileResponse
 from v2.server.inference import V2InferenceModel
 from v2.server.eval_cache import EvalCache
 from v2.server.training_view import TrainingView
+from v2.server.sweep import SweepService
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parents[1]
 RUNS_DIR = PROJECT_ROOT / "v2" / "runs"
 WEB_DIST = HERE.parent / "web" / "dist"
+RAW_DIR = PROJECT_ROOT / "v2" / "data" / "raw"
 
 inference = V2InferenceModel()
 cache = EvalCache()
 training_view = TrainingView(RUNS_DIR)
+# Sweep / backtest service — points at the most-recent run's checkpoint.
+# It loads lazily on first request to avoid blocking server startup.
+_BEST_RUN_DIR: Optional[Path] = None
+sweep_service: Optional[SweepService] = None
 
 
 def _find_best_run() -> tuple[Optional[Path], Optional[Path]]:
@@ -43,6 +49,7 @@ def _find_best_run() -> tuple[Optional[Path], Optional[Path]]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _BEST_RUN_DIR, sweep_service
     ckpt_path, tok_path = _find_best_run()
     if ckpt_path:
         print(f"[v2 server] Loading model from {ckpt_path}")
@@ -50,6 +57,13 @@ async def lifespan(app: FastAPI):
         run_dir = ckpt_path.parents[1]
         cache.load_from_report(run_dir / "REPORT.md", run_dir / "metrics.json")
         print(f"[v2 server] Model loaded. Device={inference.device}, step={inference.ckpt_step}")
+        _BEST_RUN_DIR = run_dir
+        sweep_service = SweepService(
+            run_dir=run_dir,
+            kline_path=RAW_DIR / "btcusdt_1m.parquet",
+            funding_path=RAW_DIR / "funding_btcusdt.parquet",
+            liq_path=RAW_DIR / "liq_btcusdt_per_minute.parquet",
+        )
     else:
         print("[v2 server] No trained checkpoint found. Serving without model.")
     yield
@@ -117,6 +131,57 @@ def training_status():
 @app.get("/api/v2/training/events")
 def training_events(after: Optional[float] = None, limit: int = 5000):
     return training_view.read_events(after_ts=after, limit=limit)
+
+
+@app.get("/api/v2/calibration/sweep")
+def calibration_sweep(
+    temperatures: str = "0.5,0.8,1.0,1.5,2.0",
+    horizons: str = "1,3,5,10,20,30",
+    n_samples: int = 200,
+):
+    """Sweep over (temperature, horizon) pairs and report directional accuracy.
+
+    Single forward pass per sampled window — temperatures rescale the SAME
+    logits, horizons just change which actual cumulative return we compare
+    sign against. Designed to be fast enough for interactive tuning."""
+    if sweep_service is None:
+        raise HTTPException(503, "sweep service unavailable — no trained run")
+    try:
+        T_list = [float(t) for t in temperatures.split(",") if t.strip()]
+        H_list = [int(h) for h in horizons.split(",") if h.strip()]
+    except ValueError as e:
+        raise HTTPException(400, f"bad temperatures/horizons: {e}")
+    if not T_list or not H_list:
+        raise HTTPException(400, "need at least one temperature and one horizon")
+    n_samples = max(20, min(int(n_samples), 1000))
+    try:
+        return sweep_service.sweep(temperatures=T_list, horizons=H_list, n_samples=n_samples)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"sweep failed: {e}")
+
+
+@app.get("/api/v2/backtest")
+def backtest(
+    temperature: float = 1.0,
+    horizon: int = 30,
+    z_threshold: float = 0.3,
+    start_frac: float = 0.0,
+    end_frac: float = 1.0,
+    fee_bps: float = 1.0,
+):
+    """Run a long/short backtest over a slice of the test set with the
+    chosen settings. Returns equity curve + summary stats."""
+    if sweep_service is None:
+        raise HTTPException(503, "sweep service unavailable — no trained run")
+    try:
+        return sweep_service.backtest(
+            temperature=temperature, horizon=horizon, z_threshold=z_threshold,
+            start_frac=start_frac, end_frac=end_frac, fee_bps=fee_bps,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"backtest failed: {e}")
 
 
 # Static frontend
