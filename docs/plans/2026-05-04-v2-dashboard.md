@@ -1681,9 +1681,16 @@ v2: 200
 
 - [ ] **Step 3: Send Plan 5 completion Telegram**
 
+The owner specifically asked for the **training link** in the completion message. The Training tab is the default landing tab when a run exists, so the base URL goes straight there.
+
 ```bash
 openclaw message send --channel telegram --target '8703980136' \
-    --message "Plan 5 done. v2 dashboard live at localhost:8766 + http://100.88.188.80:8766 — dark-themed 5-tab UI (Live, History, Calibration, Regimes, Equity) with lightweight-charts + per-bar predictions. Starting final tag."
+    --message "Plan 5 done. v2 dashboard live — Training tab is the landing page.
+
+  • Local:    http://localhost:8766/
+  • Tailscale: http://100.88.188.80:8766/
+
+Dark-themed 6-tab UI: Training (live progress + ETA + loss curves + hardware/model specs), Live, History, Calibration, Regimes, Equity. Starting final tag."
 ```
 
 - [ ] **Step 4: Final completion Telegram**
