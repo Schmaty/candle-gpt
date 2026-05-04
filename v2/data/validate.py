@@ -61,11 +61,11 @@ def assert_schema(
             problems.append(f"unexpected={sorted(extra)}")
         if not problems:
             problems.append(f"wrong_order: got {actual_cols}, want {cols}")
-        raise SchemaViolation("kline schema mismatch: " + "; ".join(problems))
+        raise SchemaViolation("schema mismatch: " + "; ".join(problems))
 
     for col, want_dtype in dts.items():
         got_dtype = str(df[col].dtype)
         if got_dtype != want_dtype:
             raise SchemaViolation(
-                f"kline schema mismatch: column {col} dtype={got_dtype}, want {want_dtype}"
+                f"schema mismatch: column {col} dtype={got_dtype}, want {want_dtype}"
             )

@@ -23,9 +23,8 @@ def test_interval_ms_matches_timeframes():
 
 
 def test_kline_columns_canonical_order():
-    # open_time first (used as join/sort key), close_time last in the kept set
     assert KLINE_COLUMNS == (
-        "open_time", "open", "high", "low", "close", "volume", "close_time",
+        "open_time", "open", "high", "low", "close", "volume", "close_time", "regime",
     )
 
 
@@ -33,6 +32,7 @@ def test_kline_dtypes_match_columns():
     assert set(KLINE_DTYPES.keys()) == set(KLINE_COLUMNS)
     assert KLINE_DTYPES["open_time"] == "int64"
     assert KLINE_DTYPES["close"] == "float64"
+    assert KLINE_DTYPES["regime"] == "int8"
 
 
 def test_default_history_is_four_years():

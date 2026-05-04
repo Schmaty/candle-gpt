@@ -20,6 +20,7 @@ def _make_df(open_times_ms: list[int]) -> pd.DataFrame:
         "close": [1.0] * len(open_times_ms),
         "volume":[1.0] * len(open_times_ms),
         "close_time": pd.array([t + 59_999 for t in open_times_ms], dtype="int64"),
+        "regime": pd.array([-1] * len(open_times_ms), dtype="int8"),
     })
 
 

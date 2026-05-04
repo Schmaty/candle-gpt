@@ -18,6 +18,7 @@ def _good_df() -> pd.DataFrame:
         "close":       [1.1, 1.2],
         "volume":      [10.0, 11.0],
         "close_time":  pd.array([59_999, 119_999], dtype="int64"),
+        "regime":      pd.array([-1, -1], dtype="int8"),
     })
 
 

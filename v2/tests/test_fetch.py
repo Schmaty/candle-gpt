@@ -31,6 +31,7 @@ def test_chunk_to_rows_keeps_only_canonical_columns():
     ]
     assert df["open_time"].tolist() == [0, 60_000]
     assert df["close"].tolist() == [1.1, 1.1]
+    # chunk_to_rows returns the 7-col base before regime is added by fetch_to_parquet
 
 
 @responses.activate
@@ -57,6 +58,11 @@ def test_fetch_walks_backward_until_target_start(tmp_path: Path):
     )
     assert df["open_time"].tolist() == [0, 60_000, 120_000, 180_000, 240_000, 300_000]
     assert out_path.exists()
+    # Schema-version sanity: fetcher writes the untagged sentinel.
+    out_df = pd.read_parquet(out_path)
+    assert "regime" in out_df.columns
+    assert (out_df["regime"] == -1).all()
+    assert out_df["regime"].dtype == "int8"
 
 
 @responses.activate

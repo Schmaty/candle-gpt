@@ -28,18 +28,24 @@ from v2.data.validate import dedupe_open_time
 BINANCE_KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
 MAX_LIMIT = 1000  # Binance hard cap per request
 
-# Binance returns 12 fields per kline; we keep 7.
+# Binance returns 12 fields per kline; we keep 7 base columns.
+# 'regime' is added later in fetch_to_parquet after dedup.
 _RAW_COLUMNS = [
     "open_time", "open", "high", "low", "close", "volume",
     "close_time", "quote_vol", "n_trades", "taker_buy_base", "taker_buy_quote", "ignore",
 ]
+_BASE_KLINE_COLS = ("open_time", "open", "high", "low", "close", "volume", "close_time")
+_BASE_KLINE_DTYPES = {k: v for k, v in KLINE_DTYPES.items() if k in _BASE_KLINE_COLS}
 
 
 def chunk_to_rows(chunk: list[list]) -> pd.DataFrame:
-    """Convert a raw Binance kline payload into a canonical-schema DataFrame."""
+    """Convert a raw Binance kline payload into the 7-column base DataFrame.
+
+    The `regime` column is appended in fetch_to_parquet after dedup.
+    """
     df = pd.DataFrame(chunk, columns=_RAW_COLUMNS)
-    df = df[list(KLINE_COLUMNS)].copy()
-    for col, dtype in KLINE_DTYPES.items():
+    df = df[list(_BASE_KLINE_COLS)].copy()
+    for col, dtype in _BASE_KLINE_DTYPES.items():
         df[col] = df[col].astype(dtype)
     return df
 
@@ -88,6 +94,10 @@ def fetch_to_parquet(
         )
     df = pd.concat(all_rows, ignore_index=True)
     df = dedupe_open_time(df)
+    # v2.0.0: kline schema includes regime (int8). Fetcher writes -1 sentinel;
+    # tag_regimes overwrites with {0,1,2} once funding + liq are available.
+    df = df.copy()
+    df["regime"] = pd.Series([-1] * len(df), dtype="int8")
     write_klines(df, out_path)
     return df
 

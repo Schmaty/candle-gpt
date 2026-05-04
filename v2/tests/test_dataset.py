@@ -20,6 +20,7 @@ def _write_synthetic(tmp_path: Path, n_bars: int) -> Path:
         "close":      np.arange(n_bars, dtype="float64") + 0.1,
         "volume":     np.arange(n_bars, dtype="float64") * 10.0,
         "close_time": pd.array([i * 60_000 + 59_999 for i in range(n_bars)], dtype="int64"),
+        "regime":     pd.array([-1] * n_bars, dtype="int8"),
     })
     p = parquet_path(tmp_path, Asset.BTC, Timeframe.M1)
     write_klines(df, p)
