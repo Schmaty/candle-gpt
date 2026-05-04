@@ -89,15 +89,19 @@ def evaluate(cfg: TrainConfig, ckpt_path: Path) -> dict:
         pred_ids = logits.argmax(dim=-1)
         correct = (pred_ids == ids)
 
-        correct_flat = correct.view(-1).cpu().numpy()
-        probs_flat = probs.view(-1, tok.n_bins).cpu().numpy()
-        ids_flat = ids.view(-1).cpu().numpy()
-        feats_flat = feats.view(-1, feats.size(-1)).cpu().numpy()
+        # Create valid mask — exclude last position per window (sentinel target)
+        valid_mask = torch.ones_like(ids, dtype=torch.bool)  # (B, T)
+        valid_mask[:, -1] = False
+        valid_flat = valid_mask.view(-1).cpu().numpy()
+
+        correct_flat = correct.view(-1).cpu().numpy()[valid_flat]
+        pred_ids_flat = pred_ids.view(-1).cpu().numpy()[valid_flat]
+        ids_flat = ids.view(-1).cpu().numpy()[valid_flat]
+        feats_flat = feats.view(-1, feats.size(-1)).cpu().numpy()[valid_flat]
+        probs_flat = probs.view(-1, tok.n_bins).cpu().numpy()[valid_flat]
+        top1_conf = probs_flat[np.arange(len(pred_ids_flat)), pred_ids_flat]
 
         all_correct.append(correct_flat)
-
-        pred_ids_flat = pred_ids.view(-1).cpu().numpy()
-        top1_conf = probs_flat[np.arange(len(pred_ids_flat)), pred_ids_flat]
         all_probs_top1.append(top1_conf)
 
         r0 = feats_flat[:, regime_0_idx] > 0.5

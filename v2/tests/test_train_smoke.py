@@ -88,3 +88,4 @@ def test_smoke_10_steps(tmp_path: Path):
     # status.json and events.jsonl must be present (Task 2A)
     assert (cfg.run_dir / "status.json").exists()
     assert (cfg.run_dir / "events.jsonl").exists()
+    assert cfg.best_ckpt_path.exists(), "best_val.pt was not written — val checkpoint missing"

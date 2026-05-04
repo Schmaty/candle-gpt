@@ -40,7 +40,7 @@ def _save_checkpoint(
     model: CandleGPTv2,
     optimizer: torch.optim.Optimizer,
     step: int,
-    val_loss: float,
+    val_loss: Optional[float],
     cfg: TrainConfig,
     tag: str,
 ) -> Path:
@@ -58,7 +58,8 @@ def _save_checkpoint(
         },
         path,
     )
-    log.info(f"Checkpoint saved: {path}  (step={step}, val_loss={val_loss:.4f})")
+    val_loss_str = f"{val_loss:.4f}" if val_loss is not None else "None"
+    log.info(f"Checkpoint saved: {path}  (step={step}, val_loss={val_loss_str})")
     return path
 
 
@@ -88,21 +89,22 @@ def _build_datasets(cfg: TrainConfig):
     test_indices = list(range(val_end_win, n, cfg.stride_val))
 
     return (
+        full_ds,
         Subset(full_ds, train_indices),
         Subset(full_ds, val_indices),
         Subset(full_ds, test_indices),
     )
 
 
-def _fit_tokenizer(cfg: TrainConfig, train_subset) -> ReturnTokenizerV2:
+def _fit_tokenizer(cfg: TrainConfig, train_subset, full_ds) -> ReturnTokenizerV2:
+    """Fit tokenizer from raw log_returns array on the training bar range."""
     log.info("Fitting tokenizer on training split log returns...")
-    all_rets = []
-    for feats, rets in train_subset:
-        all_rets.append(rets.numpy())
-    all_rets_arr = np.concatenate(all_rets).astype(np.float64)
-    all_rets_arr = all_rets_arr[np.isfinite(all_rets_arr)]
+    n_bars = full_ds._bars.shape[0]
+    train_end_bar = int(n_bars * cfg.train_frac)
+    train_rets = full_ds._log_returns[:train_end_bar].astype(np.float64)
+    train_rets = train_rets[np.isfinite(train_rets)]
     tok = ReturnTokenizerV2(n_bins=cfg.n_bins)
-    tok.fit(all_rets_arr)
+    tok.fit(train_rets)
     tok.save(cfg.tokenizer_path)
     log.info(f"Tokenizer fitted: n_bins={tok.n_bins}, saved to {cfg.tokenizer_path}")
     return tok
@@ -140,9 +142,12 @@ def _eval_loss(
         feats, ids = _collate(batch, tokenizer, device)
         logits = model(feats)
         B, T, V = logits.shape
+        mask = torch.ones(B, T, device=feats.device)
+        mask[:, -1] = 0.0
         loss = nn.functional.cross_entropy(
-            logits.view(B * T, V), ids.view(B * T)
+            logits.view(B * T, V), ids.view(B * T), reduction="none"
         )
+        loss = (loss * mask.view(B * T)).sum() / mask.sum()
         losses.append(loss.item())
     model.train()
     return float(np.mean(losses)) if losses else float("inf")
@@ -166,10 +171,10 @@ def train(cfg: TrainConfig) -> str:
     device = _select_device()
     log.info(f"Device: {device}")
 
-    train_ds, val_ds, test_ds = _build_datasets(cfg)
+    full_ds, train_ds, val_ds, test_ds = _build_datasets(cfg)
     log.info(f"Split — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
 
-    tokenizer = _fit_tokenizer(cfg, train_ds)
+    tokenizer = _fit_tokenizer(cfg, train_ds, full_ds)
 
     model = CandleGPTv2(cfg.model).to(device)
     log.info(f"Model params: {model.num_params():,}")
@@ -208,6 +213,7 @@ def train(cfg: TrainConfig) -> str:
 
     best_val_loss = float("inf")
     best_ckpt_path: Optional[Path] = None
+    has_validated = False
     step = 0
     train_start = time.time()
     last_ckpt_time = train_start
@@ -228,8 +234,10 @@ def train(cfg: TrainConfig) -> str:
                 if elapsed >= cfg.max_wall_clock_s:
                     log.info(f"[STOP] 6-hour cap at step {step} ({elapsed/3600:.2f}h)")
                     tag = f"step_{step:07d}"
-                    ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss, cfg, tag)
+                    ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss if has_validated else None, cfg, tag)
+                    flush_loss = float(np.mean(recent_losses)) if recent_losses else None
                     emitter.update(step=step, state="done",
+                                   train_loss=flush_loss,
                                    last_checkpoint_step=step, force=True)
                     emitter.event("checkpoint", {"step": step, "path": str(ckpt_path)})
                     return cfg.run_id
@@ -247,9 +255,15 @@ def train(cfg: TrainConfig) -> str:
                 feats, ids = _collate(batch, tokenizer, device)
                 logits = model(feats)
                 B, T, V = logits.shape
+                # Mask out the last position (sentinel target — no next bar exists)
+                mask = torch.ones(B, T, device=feats.device)
+                mask[:, -1] = 0.0
                 loss = nn.functional.cross_entropy(
-                    logits.view(B * T, V), ids.view(B * T)
+                    logits.view(B * T, V),
+                    ids.view(B * T),
+                    reduction="none",
                 )
+                loss = (loss * mask.view(B * T)).sum() / mask.sum()
                 optimizer.zero_grad()
                 loss.backward()
                 grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip).item()
@@ -293,6 +307,7 @@ def train(cfg: TrainConfig) -> str:
                                    lr=lr, last_eval_step=step, force=True)
                     emitter.event("val", {"step": step, "val_loss": val_loss})
                     last_eval_step = step
+                    has_validated = True
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         best_ckpt_path = _save_checkpoint(
@@ -306,7 +321,7 @@ def train(cfg: TrainConfig) -> str:
                     tag = f"step_{step:07d}"
                     emitter.update(step=step, state="checkpointing",
                                    last_checkpoint_step=step, force=True)
-                    ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss, cfg, tag)
+                    ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss if has_validated else None, cfg, tag)
                     emitter.event("checkpoint", {"step": step, "path": str(ckpt_path)})
                     last_checkpoint_step = step
                     last_ckpt_time = now
