@@ -345,12 +345,6 @@ function TradeWheel({
   ret2bps: (r: number) => string
   fmtPrice: (price: number) => string
 }) {
-  // Direction signal in [-1, +1]: positive = up, negative = down.
-  // Two complementary measures:
-  //  - actionSignal (probability-mass based) drives the action verb (BUY/SELL/HOLD).
-  //  - needleZ (distribution-aware z-score of expected return) drives the dial needle so
-  //    it always points in the model's "average direction" even inside the hold zone.
-  const actionSignal = p.p_up - p.p_down
   const conf = p.confidence
 
   // Variance of the predicted return distribution: σ² = Σ p_i · (c_i − E[r])².
@@ -360,16 +354,23 @@ function TradeWheel({
     variance += p.probs[i] * d * d
   }
   const distStd = Math.sqrt(Math.max(variance, 1e-12))
-  const zScore = p.expected_ret / distStd  // standardized expected return
+  const zScore = p.expected_ret / distStd  // standardized expected return — same value drives the needle.
 
-  // Decide what to recommend. Low confidence hard-overrides to HOLD.
+  // Verb is driven by z-score so it tracks the same signal as the needle.
+  // The confidence bar (below) tells the user whether to act on it; we
+  // intentionally do NOT silence the lean just because confidence is low.
+  const convictionTag =
+    conf < 0.05 ? ' · very low conviction' :
+    conf < 0.15 ? ' · low conviction' :
+    conf < 0.30 ? ' · moderate conviction' :
+                  ' · high conviction'
+
   const verb =
-    conf < 0.10 ? { label: 'HOLD',          color: 'var(--fg-dim)', sub: 'Model unsure — wait for conviction' } :
-    actionSignal >= 0.30 ? { label: 'STRONG BUY', color: '#00d4aa', sub: 'Up bins dominate the distribution' } :
-    actionSignal >= 0.10 ? { label: 'BUY',         color: '#00d4aa', sub: 'Mild up bias' } :
-    actionSignal <= -0.30 ? { label: 'STRONG SELL', color: '#f05252', sub: 'Down bins dominate the distribution' } :
-    actionSignal <= -0.10 ? { label: 'SELL',        color: '#f05252', sub: 'Mild down bias' } :
-                            { label: 'HOLD',         color: 'var(--fg-dim)', sub: 'Direction not committed' }
+    zScore >=  1.00 ? { label: 'STRONG BUY',  color: '#00d4aa', sub: 'Distribution leans strongly up' + convictionTag } :
+    zScore >=  0.30 ? { label: 'BUY',          color: '#00d4aa', sub: 'Mild upward bias' + convictionTag } :
+    zScore <= -1.00 ? { label: 'STRONG SELL', color: '#f05252', sub: 'Distribution leans strongly down' + convictionTag } :
+    zScore <= -0.30 ? { label: 'SELL',         color: '#f05252', sub: 'Mild downward bias' + convictionTag } :
+                      { label: 'HOLD',         color: 'var(--fg-dim)', sub: 'Distribution sits near center' + convictionTag }
 
   // Confidence bucket label + color.
   const confBucket =
@@ -473,7 +474,7 @@ function TradeWheel({
             <polygon
               points={`${baseLeftX},${baseLeftY} ${needleTipX},${needleTipY} ${baseRightX},${baseRightY}`}
               fill={verb.color}
-              opacity={conf < 0.10 ? 0.5 : 0.95}
+              opacity={conf < 0.05 ? 0.5 : 0.95}
             />
             <circle cx={cx} cy={cy} r={10} fill="#0b0e13" stroke={verb.color} strokeWidth={2} />
           </g>
