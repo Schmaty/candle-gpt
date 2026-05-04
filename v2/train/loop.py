@@ -109,13 +109,15 @@ def _fit_tokenizer(cfg: TrainConfig, train_subset) -> ReturnTokenizerV2:
 
 
 def _collate(batch, tokenizer: ReturnTokenizerV2, device: torch.device):
-    feats_list = []
+    # batch is the DataLoader-collated result: (feats_batch, rets_batch)
+    # feats_batch: (B, T, F), rets_batch: (B, T)
+    feats_batch, rets_batch = batch
+    B = rets_batch.shape[0]
     ids_list = []
-    for feats, log_rets in batch:
-        feats_list.append(feats)
-        ids = tokenizer.encode(log_rets.numpy())
+    for i in range(B):
+        ids = tokenizer.encode(rets_batch[i].numpy())
         ids_list.append(torch.from_numpy(ids))
-    feats = torch.stack(feats_list).to(device)
+    feats = feats_batch.to(device)
     ids = torch.stack(ids_list).to(device)
     return feats, ids
 

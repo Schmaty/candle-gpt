@@ -27,11 +27,14 @@ def _select_device() -> torch.device:
 
 
 def _collate(batch, tokenizer: ReturnTokenizerV2, device: torch.device):
-    feats_list, ids_list = [], []
-    for feats, log_rets in batch:
-        feats_list.append(feats)
-        ids_list.append(torch.from_numpy(tokenizer.encode(log_rets.numpy())))
-    return torch.stack(feats_list).to(device), torch.stack(ids_list).to(device)
+    # batch is the DataLoader-collated result: (feats_batch, rets_batch)
+    # feats_batch: (B, T, F), rets_batch: (B, T)
+    feats_batch, rets_batch = batch
+    B = rets_batch.shape[0]
+    ids_list = []
+    for i in range(B):
+        ids_list.append(torch.from_numpy(tokenizer.encode(rets_batch[i].numpy())))
+    return feats_batch.to(device), torch.stack(ids_list).to(device)
 
 
 @torch.no_grad()
