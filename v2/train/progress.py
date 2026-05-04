@@ -75,6 +75,7 @@ class ProgressEmitter:
         self.started_at_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self._last_status_write = 0.0
         self._best_val_loss: Optional[float] = None
+        self._last_val_loss: Optional[float] = None  # sticky between val passes
 
     def _atomic_write_status(self, status: TrainingStatus) -> None:
         tmp = self.status_path.with_suffix(".json.tmp")
@@ -95,6 +96,7 @@ class ProgressEmitter:
             return
         elapsed = now - self.started_at
         if val_loss is not None:
+            self._last_val_loss = val_loss
             if self._best_val_loss is None or val_loss < self._best_val_loss:
                 self._best_val_loss = val_loss
         step_eta = ((self.max_steps - step) * (elapsed / max(step, 1))) if step > 0 else self.wall_clock_cap_s
@@ -114,7 +116,7 @@ class ProgressEmitter:
             max_steps=self.max_steps,
             progress_frac=progress,
             train_loss=train_loss,
-            val_loss=val_loss,
+            val_loss=val_loss if val_loss is not None else self._last_val_loss,
             best_val_loss=self._best_val_loss,
             lr=lr,
             throughput_tok_per_s=throughput_tok_per_s,

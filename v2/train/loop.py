@@ -291,7 +291,8 @@ def train(cfg: TrainConfig) -> str:
                         last_eval_step=last_eval_step,
                     )
                     emitter.event("step", {"step": step, "loss": smooth_loss,
-                                           "lr": lr, "grad_norm": grad_norm})
+                                           "lr": lr, "grad_norm": grad_norm,
+                                           "throughput_tok_per_s": tps})
                     recent_losses = []
 
                 # Validation
