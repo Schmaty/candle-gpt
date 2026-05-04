@@ -48,6 +48,11 @@ export async function runSweep(temperatures: number[], horizons: number[], nSamp
   if (!r.ok) throw new Error(`sweep: ${r.status} ${await r.text()}`)
   return r.json()
 }
+export async function getSystemStats() {
+  const r = await fetch(`${BASE}/system/stats`)
+  if (!r.ok) throw new Error(`system/stats: ${r.status}`)
+  return r.json()
+}
 export async function getEvalHistory(runId?: string) {
   const url = runId ? `${BASE}/eval_history?run_id=${encodeURIComponent(runId)}` : `${BASE}/eval_history`
   const r = await fetch(url)

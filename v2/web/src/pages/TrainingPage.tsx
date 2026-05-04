@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createChart, type IChartApi, LineSeries } from 'lightweight-charts'
-import { getTrainingStatus, getTrainingEvents } from '../api'
+import { getTrainingStatus, getTrainingEvents, getSystemStats } from '../api'
 import { ProgressBar } from '../components/ProgressBar'
 import { SpecPanel } from '../components/SpecPanel'
 
@@ -335,6 +335,8 @@ export function TrainingPage() {
         ]} />
       )}
 
+      <SystemStatsPanel />
+
       {selectedMetric && METRIC_DEFS[selectedMetric] && (
         <MetricDetailModal
           def={METRIC_DEFS[selectedMetric]}
@@ -342,6 +344,127 @@ export function TrainingPage() {
           onClose={() => setSelectedMetric(null)}
         />
       )}
+    </div>
+  )
+}
+
+function SystemStatsPanel() {
+  const [stats, setStats] = useState<any>(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const s = await getSystemStats()
+        if (!cancelled) setStats(s)
+      } catch { /* ignore */ }
+    }
+    load()
+    const id = setInterval(load, 1500)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [])
+
+  if (!stats) {
+    return (
+      <div className="card" style={{ color: 'var(--fg-dim)', fontSize: 13 }}>Loading system stats…</div>
+    )
+  }
+
+  const cpu = stats.cpu_percent
+  const ram = stats.ram_percent
+  const gpu = stats.gpu_util_percent
+  const thermal = stats.thermal ?? {}
+  const cpuTemp = thermal.cpu_temp_c
+  const gpuTemp = thermal.gpu_temp_c
+  const fan = thermal.fan_rpm
+
+  return (
+    <div className="card">
+      <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>
+        Mac stats — refreshing every 1.5s
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+        <UsageGauge label={`CPU (${stats.cpu_count ?? '?'} cores)`} pct={cpu} color="#4a90e2" suffix="%" />
+        <UsageGauge label="RAM" pct={ram} color="#f5a623" suffix={ram != null ? `% · ${stats.ram_used_gb ?? '?'} / ${stats.ram_total_gb ?? '?'} GB` : ''} />
+        <UsageGauge label="GPU (MPS)" pct={gpu} color="#00d4aa" suffix="%" />
+      </div>
+
+      {/* Per-core CPU bars */}
+      {Array.isArray(stats.cpu_per_core) && stats.cpu_per_core.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 6 }}>Per-core CPU</div>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'flex-end', height: 36 }}>
+            {stats.cpu_per_core.map((p: number, i: number) => (
+              <div
+                key={i}
+                title={`Core ${i}: ${p.toFixed(1)}%`}
+                style={{
+                  flex: 1,
+                  height: `${Math.max(2, p)}%`,
+                  background: p > 80 ? '#f05252' : p > 50 ? '#f5a623' : '#4a90e2',
+                  borderRadius: 2,
+                  opacity: 0.85,
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Thermal + fan */}
+      <div style={{ marginTop: 16, padding: '10px 14px', background: '#0e1620', border: '1px solid #1c2230', borderRadius: 6 }}>
+        <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+          Thermal + fan
+        </div>
+        {thermal.available ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+            <Stat label="CPU temp" value={cpuTemp != null ? `${cpuTemp.toFixed(1)} °C` : '—'} color={cpuTemp != null && cpuTemp > 90 ? '#f05252' : 'var(--fg)'} />
+            <Stat label="GPU temp" value={gpuTemp != null ? `${gpuTemp.toFixed(1)} °C` : '—'} color={gpuTemp != null && gpuTemp > 90 ? '#f05252' : 'var(--fg)'} />
+            <Stat label="Fan speed" value={fan != null ? `${Math.round(fan)} rpm` : '—'} />
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: 'var(--fg-dim)', lineHeight: 1.6 }}>
+            Temperature and fan readings need <code style={{ fontFamily: 'var(--font-mono)' }}>sudo powermetrics</code>.
+            To enable, add a passwordless sudo entry:
+            <pre style={{ margin: '6px 0 0', padding: '8px 10px', background: '#0b0e13', borderRadius: 4, fontSize: 11, color: 'var(--fg)', overflowX: 'auto' }}>
+{`echo "$USER ALL=(root) NOPASSWD: /usr/bin/powermetrics" | sudo tee /etc/sudoers.d/powermetrics
+sudo chmod 440 /etc/sudoers.d/powermetrics`}
+            </pre>
+            Restart the v2 server after adding it.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function UsageGauge({ label, pct, color, suffix }: { label: string; pct: number | null; color: string; suffix: string }) {
+  const v = pct ?? 0
+  const ringColor = v > 90 ? '#f05252' : v > 70 ? '#f5a623' : color
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 6 }}>
+        <span style={{ fontSize: 11, color: 'var(--fg-dim)' }}>{label}</span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 16, color: ringColor }}>
+          {pct != null ? `${pct.toFixed(0)}` : '—'}<span style={{ fontSize: 11, color: 'var(--fg-dim)' }}>{pct != null ? suffix : ''}</span>
+        </span>
+      </div>
+      <div style={{ height: 8, background: 'var(--bg-elevated)', borderRadius: 4, overflow: 'hidden' }}>
+        <div style={{
+          height: '100%',
+          width: `${Math.max(0, Math.min(100, v))}%`,
+          background: ringColor,
+          transition: 'width 200ms',
+        }} />
+      </div>
+    </div>
+  )
+}
+
+function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
+      <div style={{ fontSize: 18, fontFamily: 'var(--font-mono)', color: color ?? 'var(--fg)', marginTop: 2 }}>{value}</div>
     </div>
   )
 }

@@ -133,6 +133,12 @@ def training_events(after: Optional[float] = None, limit: int = 5000):
     return training_view.read_events(after_ts=after, limit=limit)
 
 
+@app.get("/api/v2/system/stats")
+def system_stats():
+    from v2.server.system_stats import read_system_stats
+    return read_system_stats()
+
+
 @app.get("/api/v2/eval_history")
 def eval_history(run_id: Optional[str] = None):
     """Read v2/runs/<run_id>/eval_history.jsonl. If run_id is omitted,
