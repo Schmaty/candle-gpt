@@ -57,22 +57,26 @@ class V2InferenceModel:
             return False
 
     def _fetch_recent_binance(self, limit: int = 520) -> list[dict]:
-        end_ms = int(time.time() * 1000)
-        params = {"symbol": "BTCUSDT", "interval": "1m", "limit": limit, "endTime": end_ms}
-        r = requests.get(BINANCE_KLINES_URL, params=params, timeout=15)
-        r.raise_for_status()
-        out = []
-        for row in r.json():
-            out.append({
-                "time": int(row[0]) // 1000,
-                "open": float(row[1]),
-                "high": float(row[2]),
-                "low": float(row[3]),
-                "close": float(row[4]),
-                "volume": float(row[5]),
-                "open_time_ms": int(row[0]),
-            })
-        return sorted(out, key=lambda x: x["time"])
+        try:
+            end_ms = int(time.time() * 1000)
+            params = {"symbol": "BTCUSDT", "interval": "1m", "limit": limit, "endTime": end_ms}
+            r = requests.get(BINANCE_KLINES_URL, params=params, timeout=15)
+            r.raise_for_status()
+            out = []
+            for row in r.json():
+                out.append({
+                    "time": int(row[0]) // 1000,
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]),
+                    "open_time_ms": int(row[0]),
+                })
+            return sorted(out, key=lambda x: x["time"])
+        except Exception as e:
+            print(f"[inference] Binance fetch failed ({type(e).__name__}): {e}")
+            return []
 
     @torch.no_grad()
     def predict_live(self, limit: int = 300) -> dict:

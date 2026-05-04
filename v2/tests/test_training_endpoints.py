@@ -1,5 +1,4 @@
 import json
-import time
 from pathlib import Path
 
 from v2.server.training_view import TrainingView
@@ -24,7 +23,6 @@ def test_training_view_no_runs(tmp_path: Path):
 
 def test_training_view_picks_latest(tmp_path: Path):
     _seed_run(tmp_path, "20260504_080000", {"step": 1}, [])
-    time.sleep(0.05)
     _seed_run(tmp_path, "20260504_090000", {"step": 99}, [])
     s = TrainingView(tmp_path).read_status()
     assert s["available"] is True

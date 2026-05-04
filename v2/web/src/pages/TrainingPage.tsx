@@ -23,10 +23,10 @@ export function TrainingPage() {
   const lossChart = useRef<IChartApi | null>(null)
   const trainSeries = useRef<any>(null)
   const valSeries = useRef<any>(null)
-  const throughtputRef = useRef<HTMLDivElement>(null)
+  const throughputRef = useRef<HTMLDivElement>(null)
   const throughputChart = useRef<IChartApi | null>(null)
   const throughputSeries = useRef<any>(null)
-  const [cursor, setCursor] = useState<number | null>(null)
+  const cursorRef = useRef<number | null>(null)
   const [eventCount, setEventCount] = useState(0)
 
   // Poll status every 2s
@@ -71,22 +71,22 @@ export function TrainingPage() {
 
   // Throughput sparkline chart
   useEffect(() => {
-    if (!throughtputRef.current) return
-    const chart = createChart(throughtputRef.current, {
+    if (!throughputRef.current) return
+    const chart = createChart(throughputRef.current, {
       layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
       grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
       rightPriceScale: { borderColor: '#252d3d' },
       timeScale: { borderColor: '#252d3d', timeVisible: false },
-      width: throughtputRef.current.clientWidth,
+      width: throughputRef.current.clientWidth,
       height: 100,
     })
     const ts = chart.addSeries(LineSeries, { color: '#9b59b6', lineWidth: 1 })
     throughputChart.current = chart
     throughputSeries.current = ts
     const ro = new ResizeObserver(() => {
-      if (throughtputRef.current) chart.resize(throughtputRef.current.clientWidth, 100)
+      if (throughputRef.current) chart.resize(throughputRef.current.clientWidth, 100)
     })
-    ro.observe(throughtputRef.current)
+    ro.observe(throughputRef.current)
     return () => { ro.disconnect(); chart.remove() }
   }, [])
 
@@ -96,7 +96,7 @@ export function TrainingPage() {
 
   const fetchEvents = useCallback(async () => {
     try {
-      const res = await getTrainingEvents(cursor)
+      const res = await getTrainingEvents(cursorRef.current)
       if (!res.events?.length) return
       let changed = false
       for (const ev of res.events) {
@@ -122,9 +122,9 @@ export function TrainingPage() {
         }
         setEventCount(c => c + res.events.length)
       }
-      if (res.cursor) setCursor(res.cursor)
+      if (res.cursor) cursorRef.current = res.cursor
     } catch { /* ignore */ }
-  }, [cursor])
+  }, [])
 
   useEffect(() => {
     fetchEvents()
@@ -217,7 +217,7 @@ export function TrainingPage() {
         <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
           <span style={{ color: '#9b59b6' }}>● Throughput</span> tok/s over time
         </div>
-        <div ref={throughtputRef} style={{ width: '100%' }} />
+        <div ref={throughputRef} style={{ width: '100%' }} />
       </div>
 
       {/* Model spec */}

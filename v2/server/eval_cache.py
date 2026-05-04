@@ -40,18 +40,20 @@ class EvalCache:
     def _build_history(self, metrics: dict) -> None:
         samples = metrics.get("sample_predictions", [])
         self.history = []
-        for win_idx, win in enumerate(samples):
+        flat_idx = 0
+        for win in samples:
             for pos_idx, (pred_ret, true_ret) in enumerate(
                 zip(win.get("pred_rets", []), win.get("true_rets", []))
             ):
                 self.history.append({
-                    "idx": win_idx * 10 + pos_idx,
+                    "idx": flat_idx,
                     "pred_ret": pred_ret,
                     "true_ret": true_ret,
                     "correct": win["pred_ids"][pos_idx] == win["true_ids"][pos_idx],
                     "confidence": 0.0,
                     "regime": 0,
                 })
+                flat_idx += 1
         equity = [{"idx": 0, "cumret": 0.0, "position": 0}]
         cumret = 0.0
         thresh = 0.0002

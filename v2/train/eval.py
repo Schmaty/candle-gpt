@@ -1,5 +1,6 @@
 """Post-training evaluation of the best checkpoint on the held-out test split."""
 from __future__ import annotations
+import json
 import logging
 from pathlib import Path
 
@@ -134,7 +135,7 @@ def evaluate(cfg: TrainConfig, ckpt_path: Path) -> dict:
         if mask.sum() > 0:
             avg_conf = float(all_probs_arr[mask].mean())
             avg_acc = float(all_correct_arr[mask].mean())
-            frac = float(mask.sum()) / len(mask)
+            frac = float(mask.sum()) / len(all_probs_arr)
             ece_buckets.append({"lo": lo, "hi": hi, "conf": avg_conf,
                                  "acc": avg_acc, "frac": frac})
     ece = float(sum(b["frac"] * abs(b["conf"] - b["acc"]) for b in ece_buckets))
@@ -218,7 +219,6 @@ def write_report(metrics: dict, run_dir: Path) -> None:
     report_path = run_dir / "REPORT.md"
     report_path.write_text("\n".join(lines), encoding="utf-8")
     log.info(f"Report written: {report_path}")
-    import json as _json
     json_path = run_dir / "metrics.json"
-    json_path.write_text(_json.dumps(metrics, indent=2), encoding="utf-8")
+    json_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     log.info(f"Metrics JSON: {json_path}")

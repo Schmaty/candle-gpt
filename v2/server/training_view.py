@@ -12,9 +12,10 @@ class TrainingView:
     def _latest_run_dir(self) -> Optional[Path]:
         if not self.runs_dir.exists():
             return None
+        # Sort by name (YYYYMMDD_HHMMSS format) — more reliable than mtime.
         candidates = sorted(
             (p for p in self.runs_dir.iterdir() if p.is_dir() and (p / "status.json").exists()),
-            key=lambda p: p.stat().st_mtime,
+            key=lambda p: p.name,
             reverse=True,
         )
         return candidates[0] if candidates else None
