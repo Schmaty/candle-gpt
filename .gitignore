@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Data — too large for git, regenerate via fetch.py
+v2/data/raw/*.parquet
+
+# v1 artifacts (kept on disk, not tracked)
+checkpoints/
+runs/
+data/*.parquet
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
