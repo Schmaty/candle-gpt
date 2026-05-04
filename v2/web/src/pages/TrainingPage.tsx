@@ -93,6 +93,12 @@ export function TrainingPage() {
   const trainPoints = useRef<{time: number, value: number}[]>([])
   const valPoints = useRef<{time: number, value: number}[]>([])
   const throughputPoints = useRef<{time: number, value: number}[]>([])
+  const lrPoints = useRef<{time: number, value: number}[]>([])
+  const gradNormPoints = useRef<{time: number, value: number}[]>([])
+  const bestValPoints = useRef<{time: number, value: number}[]>([])
+  const bestValSoFar = useRef<number | null>(null)
+  const [selectedMetric, setSelectedMetric] = useState<string | null>(null)
+  const [historyTick, setHistoryTick] = useState(0)
 
   const fetchEvents = useCallback(async () => {
     try {
@@ -100,15 +106,29 @@ export function TrainingPage() {
       if (!res.events?.length) return
       let changed = false
       for (const ev of res.events) {
-        if (ev.kind === 'step' && ev.step != null && ev.loss != null) {
-          trainPoints.current.push({ time: ev.step + 1000000, value: ev.loss })
+        if (ev.kind === 'step' && ev.step != null) {
+          const t = ev.step + 1000000
+          if (ev.loss != null) {
+            trainPoints.current.push({ time: t, value: ev.loss })
+          }
           if (ev.throughput_tok_per_s != null) {
-            throughputPoints.current.push({ time: ev.step + 1000000, value: ev.throughput_tok_per_s })
+            throughputPoints.current.push({ time: t, value: ev.throughput_tok_per_s })
+          }
+          if (ev.lr != null) {
+            lrPoints.current.push({ time: t, value: ev.lr })
+          }
+          if (ev.grad_norm != null) {
+            gradNormPoints.current.push({ time: t, value: ev.grad_norm })
           }
           changed = true
         }
         if (ev.kind === 'val' && ev.step != null && ev.val_loss != null) {
-          valPoints.current.push({ time: ev.step + 1000000, value: ev.val_loss })
+          const t = ev.step + 1000000
+          valPoints.current.push({ time: t, value: ev.val_loss })
+          if (bestValSoFar.current == null || ev.val_loss < bestValSoFar.current) {
+            bestValSoFar.current = ev.val_loss
+          }
+          bestValPoints.current.push({ time: t, value: bestValSoFar.current as number })
           changed = true
         }
       }
@@ -121,10 +141,28 @@ export function TrainingPage() {
           throughputChart.current?.timeScale().fitContent()
         }
         setEventCount(c => c + res.events.length)
+        setHistoryTick(t => t + 1)
       }
       if (res.cursor) cursorRef.current = res.cursor
     } catch { /* ignore */ }
   }, [])
+
+  // ESC closes the modal
+  useEffect(() => {
+    if (selectedMetric == null) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSelectedMetric(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selectedMetric])
+
+  const METRIC_DEFS: Record<string, { label: string, points: () => {time:number,value:number}[], color: string, format: (v: number) => string }> = {
+    train_loss: { label: 'Train loss',   points: () => trainPoints.current,      color: '#00d4aa', format: v => v.toFixed(4) },
+    val_loss:   { label: 'Val loss',     points: () => valPoints.current,        color: '#f5a623', format: v => v.toFixed(4) },
+    best_val:   { label: 'Best val',     points: () => bestValPoints.current,    color: '#ffcc66', format: v => v.toFixed(4) },
+    lr:         { label: 'LR',           points: () => lrPoints.current,         color: '#4a90e2', format: v => v.toExponential(2) },
+    grad_norm:  { label: 'Grad norm',    points: () => gradNormPoints.current,   color: '#e74c3c', format: v => v.toFixed(3) },
+    throughput: { label: 'Throughput',   points: () => throughputPoints.current, color: '#9b59b6', format: v => `${Math.round(v).toLocaleString()} tok/s` },
+  }
 
   useEffect(() => {
     fetchEvents()
@@ -176,19 +214,57 @@ export function TrainingPage() {
         <div className="card">
           <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Live Metrics</div>
           <div className="metric-row" style={{ marginBottom: 0 }}>
-            {[
-              ['Train loss', status.train_loss != null ? status.train_loss.toFixed(4) : '—'],
-              ['Val loss',   status.val_loss   != null ? status.val_loss.toFixed(4)   : '—'],
-              ['Best val',  status.best_val_loss != null ? status.best_val_loss.toFixed(4) : '—'],
-              ['LR',        status.lr != null ? status.lr.toExponential(2) : '—'],
-              ['Grad norm', status.grad_norm != null ? status.grad_norm.toFixed(3) : '—'],
-              ['Throughput', status.throughput_tok_per_s != null ? `${Math.round(status.throughput_tok_per_s).toLocaleString()} tok/s` : '—'],
-            ].map(([l, v]) => (
-              <div key={l as string} className="metric" style={{ minWidth: 110 }}>
-                <div className="label">{l}</div>
-                <div className="value" style={{ fontSize: 15 }}>{v}</div>
-              </div>
-            ))}
+            {([
+              ['train_loss', 'Train loss', status.train_loss != null ? status.train_loss.toFixed(4) : '—'],
+              ['val_loss',   'Val loss',   status.val_loss   != null ? status.val_loss.toFixed(4)   : '—'],
+              ['best_val',   'Best val',   status.best_val_loss != null ? status.best_val_loss.toFixed(4) : '—'],
+              ['lr',         'LR',         status.lr != null ? status.lr.toExponential(2) : '—'],
+              ['grad_norm',  'Grad norm',  status.grad_norm != null ? status.grad_norm.toFixed(3) : '—'],
+              ['throughput', 'Throughput', status.throughput_tok_per_s != null ? `${Math.round(status.throughput_tok_per_s).toLocaleString()} tok/s` : '—'],
+            ] as Array<[string, string, string]>).map(([key, l, v]) => {
+              const n = METRIC_DEFS[key]?.points().length ?? 0
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setSelectedMetric(key)}
+                  className="metric"
+                  title={n > 0 ? `Click for ${n}-point history` : 'No history yet'}
+                  style={{
+                    minWidth: 110,
+                    background: 'transparent',
+                    border: '1px solid transparent',
+                    borderRadius: 6,
+                    padding: '6px 10px',
+                    margin: 0,
+                    textAlign: 'left',
+                    cursor: n > 0 ? 'pointer' : 'default',
+                    color: 'inherit',
+                    fontFamily: 'inherit',
+                    transition: 'border-color 120ms, background 120ms',
+                  }}
+                  onMouseEnter={e => {
+                    if (n > 0) {
+                      ;(e.currentTarget as HTMLElement).style.borderColor = METRIC_DEFS[key].color
+                      ;(e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.02)'
+                    }
+                  }}
+                  onMouseLeave={e => {
+                    ;(e.currentTarget as HTMLElement).style.borderColor = 'transparent'
+                    ;(e.currentTarget as HTMLElement).style.background = 'transparent'
+                  }}
+                >
+                  <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: METRIC_DEFS[key].color, display: 'inline-block' }} />
+                    {l}
+                  </div>
+                  <div className="value" style={{ fontSize: 15 }}>{v}</div>
+                  <div style={{ fontSize: 10, color: 'var(--fg-dim)', marginTop: 2, fontFamily: 'var(--font-mono)' }}>
+                    {n > 0 ? `${n} pts ›` : '—'}
+                  </div>
+                </button>
+              )
+            })}
           </div>
         </div>
 
@@ -231,6 +307,117 @@ export function TrainingPage() {
           { label: 'Window', value: `${status.model.window} bars` },
         ]} />
       )}
+
+      {selectedMetric && METRIC_DEFS[selectedMetric] && (
+        <MetricDetailModal
+          def={METRIC_DEFS[selectedMetric]}
+          historyTick={historyTick}
+          onClose={() => setSelectedMetric(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+function MetricDetailModal({
+  def,
+  historyTick,
+  onClose,
+}: {
+  def: { label: string, points: () => {time:number,value:number}[], color: string, format: (v: number) => string }
+  historyTick: number
+  onClose: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<IChartApi | null>(null)
+  const seriesRef = useRef<any>(null)
+
+  useEffect(() => {
+    if (!ref.current) return
+    const chart = createChart(ref.current, {
+      layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
+      grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
+      rightPriceScale: { borderColor: '#252d3d' },
+      timeScale: { borderColor: '#252d3d', timeVisible: false },
+      width: ref.current.clientWidth,
+      height: 380,
+      crosshair: { mode: 0 },
+    })
+    const s = chart.addSeries(LineSeries, { color: def.color, lineWidth: 2, title: def.label })
+    chartRef.current = chart
+    seriesRef.current = s
+    const ro = new ResizeObserver(() => {
+      if (ref.current) chart.resize(ref.current.clientWidth, 380)
+    })
+    ro.observe(ref.current)
+    return () => { ro.disconnect(); chart.remove() }
+  }, [def.label, def.color])
+
+  useEffect(() => {
+    if (!seriesRef.current) return
+    const data = [...def.points()].sort((a, b) => a.time - b.time)
+    seriesRef.current.setData(data)
+    chartRef.current?.timeScale().fitContent()
+  }, [def, historyTick])
+
+  const points = def.points()
+  const n = points.length
+  const last = n > 0 ? points[n - 1].value : null
+  const min = n > 0 ? Math.min(...points.map(p => p.value)) : null
+  const max = n > 0 ? Math.max(...points.map(p => p.value)) : null
+  const lastStep = n > 0 ? points[n - 1].time - 1000000 : null
+  const firstStep = n > 0 ? points[0].time - 1000000 : null
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(4px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 24,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        className="card"
+        style={{ width: '100%', maxWidth: 960, padding: 20, position: 'relative' }}
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          style={{
+            position: 'absolute', top: 12, right: 12,
+            background: 'transparent', border: 'none', color: 'var(--fg-dim)',
+            fontSize: 20, cursor: 'pointer', lineHeight: 1, padding: 4,
+          }}
+        >×</button>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+          <span style={{ width: 10, height: 10, borderRadius: '50%', background: def.color }} />
+          <h2 style={{ margin: 0, fontSize: 18 }}>{def.label} — full history</h2>
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginBottom: 16 }}>
+          {n > 0
+            ? `${n} points · steps ${firstStep?.toLocaleString()} → ${lastStep?.toLocaleString()} · last ${def.format(last!)}`
+            : 'No data points yet — wait for the next training event.'}
+        </div>
+
+        <div ref={ref} style={{ width: '100%' }} />
+
+        {n > 0 && (
+          <div className="metric-row" style={{ marginTop: 16, gap: 24 }}>
+            <div className="metric"><div className="label">Last</div><div className="value">{def.format(last!)}</div></div>
+            <div className="metric"><div className="label">Min</div><div className="value">{def.format(min!)}</div></div>
+            <div className="metric"><div className="label">Max</div><div className="value">{def.format(max!)}</div></div>
+            <div className="metric"><div className="label">Points</div><div className="value">{n}</div></div>
+            <div className="metric"><div className="label">Last step</div><div className="value">{lastStep?.toLocaleString()}</div></div>
+          </div>
+        )}
+
+        <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 16 }}>
+          Press <kbd style={{ background: '#1c2230', padding: '1px 6px', borderRadius: 3, fontSize: 10 }}>Esc</kbd> or click outside to close.
+        </div>
+      </div>
     </div>
   )
 }
