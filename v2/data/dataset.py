@@ -1,10 +1,12 @@
 """PyTorch Dataset over a (asset, timeframe) parquet, with optional feature joins.
 
 When `funding_path` and/or `liq_path` are provided, the per-bar tensor is
-widened with the joined feature columns in canonical order:
+widened with the joined feature columns. When `apply_features=True` (default)
+and a join was performed, the 18 raw join columns are further transformed into
+the 41-dim engineered feature vector via v2.features.engineer.compute_features.
 
-    [ ...kline cols (incl. regime), funding_rate, mark_price,
-      minutes_until_funding, liq aggregates(7) ]
+When `return_targets=True`, __getitem__ returns (features, log_returns) where
+log_returns[i] = log(close[i+1] / close[i]), 0.0 for the final bar.
 """
 from __future__ import annotations
 from pathlib import Path
@@ -44,7 +46,6 @@ def _join_features(
     df = klines.copy()
     open_times = df["open_time"]
 
-    # Funding ffill + minutes_until_funding.
     if funding is not None and not funding.empty:
         f = funding.sort_values("funding_time").reset_index(drop=True)
         merged = pd.merge_asof(
@@ -53,7 +54,6 @@ def _join_features(
         )
         df["funding_rate"] = merged["funding_rate"].fillna(0.0).to_numpy()
         df["mark_price"] = merged["mark_price"].fillna(df["close"]).to_numpy()
-        # Forward search to find next funding_time >= open_time.
         next_idx = np.searchsorted(f["funding_time"].to_numpy(), open_times.to_numpy(),
                                    side="right")
         next_t = np.where(
@@ -73,7 +73,6 @@ def _join_features(
         df["mark_price"] = df["close"].to_numpy()
         df["minutes_until_funding"] = _MAX_MINUTES_UNTIL_FUNDING
 
-    # Liq aggregates joined on bucket_time == open_time.
     liq_cols_out = [
         "liq_count", "liq_sum_notional", "liq_max_single",
         "long_liq_count", "long_liq_notional",
@@ -98,7 +97,15 @@ def _join_features(
 
 
 class KlineWindowDataset(Dataset):
-    """Windowed access over a kline parquet, with optional funding+liq join."""
+    """Windowed access over a kline parquet, with optional funding+liq join.
+
+    Kwargs:
+        apply_features: If True (default) AND a join was performed, transform
+            the 18 raw join columns into the 41-dim engineered feature vector.
+            Has no effect when no join paths are provided.
+        return_targets: If True, __getitem__ returns (features, log_returns)
+            where log_returns[i] = log(close[i+1]/close[i]), 0.0 for last bar.
+    """
 
     def __init__(
         self,
@@ -108,6 +115,8 @@ class KlineWindowDataset(Dataset):
         *,
         funding_path: Path | None = None,
         liq_path: Path | None = None,
+        apply_features: bool = True,
+        return_targets: bool = False,
     ) -> None:
         if window <= 0:
             raise ValueError(f"window must be positive, got {window}")
@@ -123,12 +132,30 @@ class KlineWindowDataset(Dataset):
         liq = read_liq_bucketed(liq_path) if liq_path is not None else None
 
         if funding is not None or liq is not None:
-            features = _join_features(df, funding, liq)
-            self._columns = FEATURE_COLUMNS_WITH_JOIN
+            joined = _join_features(df, funding, liq)
+            if apply_features:
+                from v2.features.engineer import compute_features
+                from v2.features.constants import FEATURE_COLUMNS
+                features = compute_features(joined)
+                self._columns = FEATURE_COLUMNS
+            else:
+                features = joined
+                self._columns = FEATURE_COLUMNS_WITH_JOIN
         else:
             features = df[list(KLINE_COLUMNS)]
             self._columns = KLINE_COLUMNS
 
+        if return_targets:
+            close_arr = df["close"].to_numpy(dtype=np.float64)
+            log_returns = np.zeros(len(close_arr), dtype=np.float32)
+            log_returns[:-1] = np.log(
+                close_arr[1:] / np.maximum(close_arr[:-1], 1e-12)
+            )
+            self._log_returns = log_returns
+        else:
+            self._log_returns = None
+
+        self._return_targets = return_targets
         self._bars = np.ascontiguousarray(features.to_numpy(dtype=np.float32))
         self._window = window
         self._stride = stride
@@ -141,8 +168,17 @@ class KlineWindowDataset(Dataset):
     def __len__(self) -> int:
         return self._n_windows
 
-    def __getitem__(self, idx: int) -> torch.Tensor:
+    def __getitem__(
+        self, idx: int
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if idx < 0 or idx >= self._n_windows:
             raise IndexError(idx)
         start = idx * self._stride
-        return torch.from_numpy(self._bars[start : start + self._window])
+        feats = torch.from_numpy(self._bars[start : start + self._window])
+        if self._return_targets:
+            assert self._log_returns is not None
+            targets = torch.from_numpy(
+                self._log_returns[start : start + self._window]
+            )
+            return feats, targets
+        return feats
