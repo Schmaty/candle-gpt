@@ -25,7 +25,7 @@ from v2.data.constants import (
 from v2.data.store import parquet_path, write_klines
 from v2.data.validate import dedupe_open_time
 
-BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
 MAX_LIMIT = 1000  # Binance hard cap per request
 
 # Binance returns 12 fields per kline; we keep 7.
