@@ -75,7 +75,7 @@ def test_dataset_without_join_returns_8_cols(tmp_path: Path):
 
 def test_dataset_with_join_returns_17_cols(tmp_path: Path):
     kp, fp, lp = _setup(tmp_path)
-    ds = KlineWindowDataset(kp, window=10, stride=1, funding_path=fp, liq_path=lp)
+    ds = KlineWindowDataset(kp, window=10, stride=1, funding_path=fp, liq_path=lp, apply_features=False)
     item = ds[0]
     assert item.shape == (10, len(FEATURE_COLUMNS_WITH_JOIN))
     assert item.dtype == torch.float32
@@ -83,7 +83,7 @@ def test_dataset_with_join_returns_17_cols(tmp_path: Path):
 
 def test_minutes_until_funding_decreases_then_resets(tmp_path: Path):
     kp, fp, lp = _setup(tmp_path)
-    ds = KlineWindowDataset(kp, window=200, stride=1, funding_path=fp, liq_path=lp)
+    ds = KlineWindowDataset(kp, window=200, stride=1, funding_path=fp, liq_path=lp, apply_features=False)
     item = ds[0].numpy()
     muf_idx = list(FEATURE_COLUMNS_WITH_JOIN).index("minutes_until_funding")
     muf = item[:, muf_idx]
@@ -97,7 +97,7 @@ def test_minutes_until_funding_decreases_then_resets(tmp_path: Path):
 
 def test_funding_rate_ffilled(tmp_path: Path):
     kp, fp, lp = _setup(tmp_path)
-    ds = KlineWindowDataset(kp, window=200, stride=1, funding_path=fp, liq_path=lp)
+    ds = KlineWindowDataset(kp, window=200, stride=1, funding_path=fp, liq_path=lp, apply_features=False)
     item = ds[0].numpy()
     fr_idx = list(FEATURE_COLUMNS_WITH_JOIN).index("funding_rate")
     rates = item[:, fr_idx]
@@ -109,7 +109,7 @@ def test_funding_rate_ffilled(tmp_path: Path):
 
 def test_liq_aggregates_zero_filled(tmp_path: Path):
     kp, fp, lp = _setup(tmp_path)
-    ds = KlineWindowDataset(kp, window=200, stride=1, funding_path=fp, liq_path=lp)
+    ds = KlineWindowDataset(kp, window=200, stride=1, funding_path=fp, liq_path=lp, apply_features=False)
     item = ds[0].numpy()
     cnt_idx = list(FEATURE_COLUMNS_WITH_JOIN).index("liq_count")
     sum_idx = list(FEATURE_COLUMNS_WITH_JOIN).index("liq_sum_notional")
@@ -129,7 +129,7 @@ def test_dataloader_handles_empty_liq_parquet(tmp_path: Path):
         c: pd.Series(dtype=LIQ_BUCKETED_DTYPES[c]) for c in LIQ_BUCKETED_COLUMNS
     })
     write_liq_bucketed(empty, lp)
-    ds = KlineWindowDataset(kp, window=10, stride=1, funding_path=fp, liq_path=lp)
+    ds = KlineWindowDataset(kp, window=10, stride=1, funding_path=fp, liq_path=lp, apply_features=False)
     item = ds[0].numpy()
     cnt_idx = list(FEATURE_COLUMNS_WITH_JOIN).index("liq_count")
     assert (item[:, cnt_idx] == 0).all()
