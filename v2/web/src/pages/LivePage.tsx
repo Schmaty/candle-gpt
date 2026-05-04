@@ -15,6 +15,7 @@ interface PredictedPoint {
   time: number
   close: number
   ret_bps: number
+  cumulative_ret_bps: number
 }
 
 interface Prediction {
@@ -33,6 +34,11 @@ interface Prediction {
   max_entropy_bits: number
   confidence: number
   predicted_path?: PredictedPoint[]
+  horizon_bars?: number
+  horizon_cumulative_ret?: number
+  horizon_cumulative_close?: number
+  horizon_cumulative_std?: number
+  horizon_cumulative_z?: number
 }
 
 export function LivePage() {
@@ -168,12 +174,12 @@ export function LivePage() {
       {/* Chart */}
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         <div style={{ padding: '10px 14px', fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #1c2230' }}>
-          BTC/USDT {interval} candles  ·  <span style={{ color: '#f5a623', textTransform: 'none', letterSpacing: 0 }}>— — — predicted path</span>
-          {prediction?.predicted_path && prediction.predicted_path.length === 2 && (
+          BTC/USDT {interval} candles  ·  <span style={{ color: '#f5a623', textTransform: 'none', letterSpacing: 0 }}>— — — {prediction?.horizon_bars ?? 30}-bar predicted path</span>
+          {prediction?.predicted_path && prediction.predicted_path.length > 0 && (
             <span style={{ color: 'var(--fg-dim)', textTransform: 'none', letterSpacing: 0, marginLeft: 12, fontFamily: 'var(--font-mono)' }}>
-              t+1 ≈ ${prediction.predicted_path[0].close.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-              {'  ·  '}
-              t+2 ≈ ${prediction.predicted_path[1].close.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              end ≈ ${prediction.predicted_path[prediction.predicted_path.length - 1].close.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              {' · '}
+              cum {(prediction.predicted_path[prediction.predicted_path.length - 1].cumulative_ret_bps).toFixed(1)} bps
             </span>
           )}
         </div>
@@ -346,19 +352,27 @@ function TradeWheel({
   fmtPrice: (price: number) => string
 }) {
   const conf = p.confidence
+  const horizonBars = p.horizon_bars ?? 30
 
-  // Variance of the predicted return distribution: σ² = Σ p_i · (c_i − E[r])².
+  // Per-bar z-score (variance of next-bar distribution). Kept for reference;
+  // the verb + needle now use the *cumulative* horizon z-score.
   let variance = 0
   for (let i = 0; i < p.probs.length; i++) {
     const d = p.bin_centers[i] - p.expected_ret
     variance += p.probs[i] * d * d
   }
-  const distStd = Math.sqrt(Math.max(variance, 1e-12))
-  const zScore = p.expected_ret / distStd  // standardized expected return — same value drives the needle.
+  const perBarStd = Math.sqrt(Math.max(variance, 1e-12))
 
-  // Verb is driven by z-score so it tracks the same signal as the needle.
-  // The confidence bar (below) tells the user whether to act on it; we
-  // intentionally do NOT silence the lean just because confidence is low.
+  // Cumulative horizon stats from the server's 30-step rollout.
+  const cumRet = p.horizon_cumulative_ret ?? p.expected_ret
+  const cumStd = p.horizon_cumulative_std ?? perBarStd
+  const cumClose = p.horizon_cumulative_close ?? p.expected_close
+  const zScore = p.horizon_cumulative_z ?? (cumRet / Math.max(cumStd, 1e-12))
+
+  // Verb is driven by the cumulative-horizon z-score so the recommendation
+  // reflects the model's lean over the full 30-bar forecast, not a single
+  // step. Confidence is shown as a sub-label suffix; we don't silence the
+  // lean when confidence is low — the bar below tells the user whether to act.
   const convictionTag =
     conf < 0.05 ? ' · very low conviction' :
     conf < 0.15 ? ' · low conviction' :
@@ -366,11 +380,11 @@ function TradeWheel({
                   ' · high conviction'
 
   const verb =
-    zScore >=  1.00 ? { label: 'STRONG BUY',  color: '#00d4aa', sub: 'Distribution leans strongly up' + convictionTag } :
-    zScore >=  0.30 ? { label: 'BUY',          color: '#00d4aa', sub: 'Mild upward bias' + convictionTag } :
-    zScore <= -1.00 ? { label: 'STRONG SELL', color: '#f05252', sub: 'Distribution leans strongly down' + convictionTag } :
-    zScore <= -0.30 ? { label: 'SELL',         color: '#f05252', sub: 'Mild downward bias' + convictionTag } :
-                      { label: 'HOLD',         color: 'var(--fg-dim)', sub: 'Distribution sits near center' + convictionTag }
+    zScore >=  1.00 ? { label: 'STRONG BUY',  color: '#00d4aa', sub: `Cumulative ${horizonBars}-bar lean strongly up` + convictionTag } :
+    zScore >=  0.30 ? { label: 'BUY',          color: '#00d4aa', sub: `Mild upward lean over ${horizonBars} bars` + convictionTag } :
+    zScore <= -1.00 ? { label: 'STRONG SELL', color: '#f05252', sub: `Cumulative ${horizonBars}-bar lean strongly down` + convictionTag } :
+    zScore <= -0.30 ? { label: 'SELL',         color: '#f05252', sub: `Mild downward lean over ${horizonBars} bars` + convictionTag } :
+                      { label: 'HOLD',         color: 'var(--fg-dim)', sub: `Net ${horizonBars}-bar lean near zero` + convictionTag }
 
   // Confidence bucket label + color.
   const confBucket =
@@ -429,7 +443,7 @@ function TradeWheel({
   return (
     <div className="card" style={{ padding: '20px 24px' }}>
       <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>
-        Trade analysis — next {interval} bar
+        Trade analysis — next {horizonBars} × {interval} bars
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'center' }}>
@@ -512,11 +526,11 @@ function TradeWheel({
         }}
       >
         <div>
-          θ = tanh(E[r] / σ) · 90° = tanh(
-          <span style={{ color: 'var(--fg)' }}>{p.expected_ret >= 0 ? '+' : ''}{(p.expected_ret * 1e4).toFixed(2)} bps</span>
+          θ = tanh(Σ E[rᵢ] / σ_cum) · 90° = tanh(
+          <span style={{ color: 'var(--fg)' }}>{cumRet >= 0 ? '+' : ''}{(cumRet * 1e4).toFixed(2)} bps</span>
           {' / '}
-          <span style={{ color: 'var(--fg)' }}>{(distStd * 1e4).toFixed(2)} bps</span>
-          ) · 90°
+          <span style={{ color: 'var(--fg)' }}>{(cumStd * 1e4).toFixed(2)} bps</span>
+          ) · 90°  <span style={{ color: 'var(--fg-dim)' }}>over {horizonBars} bars</span>
         </div>
         <div style={{ marginTop: 2 }}>
           z = <span style={{ color: 'var(--fg)' }}>{zScore.toFixed(3)}</span>
@@ -556,10 +570,10 @@ function TradeWheel({
         paddingTop: 14,
         borderTop: '1px solid #1c2230',
       }}>
-        <Stat label="P(Up)"   value={`${(p.p_up * 100).toFixed(1)}%`}  color="#00d4aa" />
-        <Stat label="P(Down)" value={`${(p.p_down * 100).toFixed(1)}%`} color="#f05252" />
-        <Stat label="Expected" value={ret2bps(p.expected_ret)} color={p.expected_ret > p.flat_eps ? '#00d4aa' : p.expected_ret < -p.flat_eps ? '#f05252' : 'var(--fg-dim)'} />
-        <Stat label="Target" value={fmtPrice(p.expected_close)} />
+        <Stat label="P(Up) next" value={`${(p.p_up * 100).toFixed(1)}%`}  color="#00d4aa" />
+        <Stat label="P(Down) next" value={`${(p.p_down * 100).toFixed(1)}%`} color="#f05252" />
+        <Stat label={`Cumulative ${horizonBars}-bar`} value={ret2bps(cumRet)} color={cumRet > p.flat_eps ? '#00d4aa' : cumRet < -p.flat_eps ? '#f05252' : 'var(--fg-dim)'} />
+        <Stat label={`Target after ${horizonBars}`} value={fmtPrice(cumClose)} />
       </div>
     </div>
   )

@@ -153,48 +153,73 @@ class V2InferenceModel:
             last_close = float(window_candles[-1]["close"])
             expected_close = last_close * float(np.exp(expected_ret))
 
-            # 2-step autoregressive rollout for the chart overlay.
-            # Append a synthetic bar at the predicted close, recompute features,
-            # rerun the model — that gives a (rough) prediction for bar +2.
+            # 30-step autoregressive rollout — one model forward pass per future
+            # bar. We use the rollout to:
+            #   (a) draw a 30-bar predicted path on the chart, and
+            #   (b) score the BUY/HOLD/SELL decision off the *cumulative* 30-bar
+            #       z-score rather than a single-step lean (since per-step
+            #       expected returns are tiny on this model).
             interval_ms = INTERVAL_MS.get(interval, 60_000)
             last_open_ms = int(window_candles[-1]["open_time_ms"])
-            t1_open_ms = last_open_ms + interval_ms
-            t2_open_ms = t1_open_ms + interval_ms
+            HORIZON_BARS = 30
+            predicted_path = []
+            cumulative_log_ret = 0.0
+            cumulative_variance = 0.0
             try:
                 synth_volume = float(np.mean([float(c["volume"]) for c in window_candles[-10:]]))
-                synth_open = last_close
-                synth_close = expected_close
-                synth_high = max(synth_open, synth_close)
-                synth_low = min(synth_open, synth_close)
-                synth_row = pd.DataFrame([{
-                    "open_time": t1_open_ms,
-                    "open": synth_open, "high": synth_high, "low": synth_low,
-                    "close": synth_close, "volume": synth_volume,
-                    "close_time": t1_open_ms + interval_ms - 1,
-                    "regime": pd.array([-1], dtype="int8")[0],
-                    "funding_rate": 0.0001,
-                    "mark_price": synth_close,
-                    "minutes_until_funding": 240.0,
-                    "liq_count": 0.0, "liq_sum_notional": 0.0, "liq_max_single": 0.0,
-                    "long_liq_count": 0.0, "long_liq_notional": 0.0,
-                    "short_liq_count": 0.0, "short_liq_notional": 0.0,
-                }])[list(FEATURE_COLUMNS_WITH_JOIN)]
-                ext_df = pd.concat([df_kline, synth_row], ignore_index=True).iloc[-block_size:]
-                ext_feats_df = compute_features(ext_df)
-                ext_feats = torch.from_numpy(ext_feats_df.to_numpy(dtype=np.float32)).unsqueeze(0).to(self.device)
-                ext_logits = self.model(ext_feats)
-                ext_probs = F.softmax(ext_logits[0, -1, :], dim=-1).cpu().numpy()
-                expected_ret_t2 = float((ext_probs * bin_centers_arr).sum())
-                expected_close_t2 = synth_close * float(np.exp(expected_ret_t2))
-            except Exception as e:
-                print(f"[inference] 2-step rollout failed, falling back to linear: {e}")
-                expected_ret_t2 = expected_ret
-                expected_close_t2 = expected_close * float(np.exp(expected_ret))
+                running_df = df_kline.copy()
+                running_close = last_close
+                step_probs = probs
+                step_expected_ret = expected_ret
+                step_variance = float((step_probs * (bin_centers_arr - step_expected_ret) ** 2).sum())
+                for i in range(HORIZON_BARS):
+                    if i > 0:
+                        # Build a synthetic bar at the previous step's predicted close
+                        # and append, then re-run features + model.
+                        prev_open_ms = int(running_df.iloc[-1]["open_time"]) + interval_ms
+                        synth_open = float(running_df.iloc[-1]["close"])
+                        synth_close = running_close
+                        synth_high = max(synth_open, synth_close)
+                        synth_low = min(synth_open, synth_close)
+                        synth_row = pd.DataFrame([{
+                            "open_time": prev_open_ms,
+                            "open": synth_open, "high": synth_high, "low": synth_low,
+                            "close": synth_close, "volume": synth_volume,
+                            "close_time": prev_open_ms + interval_ms - 1,
+                            "regime": pd.array([-1], dtype="int8")[0],
+                            "funding_rate": 0.0001,
+                            "mark_price": synth_close,
+                            "minutes_until_funding": 240.0,
+                            "liq_count": 0.0, "liq_sum_notional": 0.0, "liq_max_single": 0.0,
+                            "long_liq_count": 0.0, "long_liq_notional": 0.0,
+                            "short_liq_count": 0.0, "short_liq_notional": 0.0,
+                        }])[list(FEATURE_COLUMNS_WITH_JOIN)]
+                        running_df = pd.concat([running_df, synth_row], ignore_index=True).iloc[-block_size:]
+                        running_feats_df = compute_features(running_df)
+                        running_feats = torch.from_numpy(running_feats_df.to_numpy(dtype=np.float32)).unsqueeze(0).to(self.device)
+                        running_logits = self.model(running_feats)
+                        step_probs = F.softmax(running_logits[0, -1, :], dim=-1).cpu().numpy()
+                        step_expected_ret = float((step_probs * bin_centers_arr).sum())
+                        step_variance = float((step_probs * (bin_centers_arr - step_expected_ret) ** 2).sum())
 
-            predicted_path = [
-                {"time": t1_open_ms // 1000, "close": expected_close,    "ret_bps": expected_ret * 1e4},
-                {"time": t2_open_ms // 1000, "close": expected_close_t2, "ret_bps": expected_ret_t2 * 1e4},
-            ]
+                    cumulative_log_ret += step_expected_ret
+                    cumulative_variance += step_variance
+                    new_close = running_close * float(np.exp(step_expected_ret))
+                    new_open_ms = last_open_ms + (i + 1) * interval_ms
+                    predicted_path.append({
+                        "time": new_open_ms // 1000,
+                        "close": new_close,
+                        "ret_bps": step_expected_ret * 1e4,
+                        "cumulative_ret_bps": cumulative_log_ret * 1e4,
+                    })
+                    running_close = new_close
+            except Exception as e:
+                print(f"[inference] {HORIZON_BARS}-step rollout failed at i={len(predicted_path)}: {e}")
+                # Truncate the path to whatever finished and continue.
+
+            cumulative_std = float(np.sqrt(max(cumulative_variance, 1e-24)))
+            cumulative_z = cumulative_log_ret / cumulative_std
+            cumulative_close = last_close * float(np.exp(cumulative_log_ret))
             return {
                 "candles": chart_candles,
                 "interval": interval,
@@ -214,6 +239,11 @@ class V2InferenceModel:
                     "max_entropy_bits": max_entropy_bits,
                     "confidence": confidence,
                     "predicted_path": predicted_path,
+                    "horizon_bars": HORIZON_BARS,
+                    "horizon_cumulative_ret": cumulative_log_ret,
+                    "horizon_cumulative_close": cumulative_close,
+                    "horizon_cumulative_std": cumulative_std,
+                    "horizon_cumulative_z": cumulative_z,
                 },
             }
         except Exception as e:
