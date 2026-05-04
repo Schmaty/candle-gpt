@@ -44,6 +44,14 @@ export function TrainingPage() {
     return () => { cancelled = true; clearInterval(id) }
   }, [])
 
+  // Tick every 500ms so we can interpolate elapsed/ETA between server writes
+  // (status.json is only rewritten every log_interval_steps ~ 46s).
+  const [, setNowTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(t => t + 1), 500)
+    return () => clearInterval(id)
+  }, [])
+
   // Poll events every 5s, update chart
   useEffect(() => {
     if (!lossRef.current) return
@@ -186,7 +194,26 @@ export function TrainingPage() {
   }
 
   const stateColor = STATE_COLORS[status.state] ?? 'var(--fg-dim)'
-  const progress = status.progress_frac ?? 0
+
+  // Interpolate elapsed/ETA between server writes. status.json carries
+  // last_update_utc; we add (now - that timestamp) to elapsed_s and subtract
+  // it from eta_s so the seconds tick locally even though the server only
+  // rewrites every log_interval_steps. Only do this while training is active.
+  const liveState = status.state === 'training' || status.state === 'evaluating' || status.state === 'checkpointing'
+  let displayElapsed = status.elapsed_s ?? 0
+  let displayEta = status.eta_s ?? 0
+  if (liveState && status.last_update_utc) {
+    const lastUpdateMs = Date.parse(status.last_update_utc)
+    if (!Number.isNaN(lastUpdateMs)) {
+      const drift_s = Math.max(0, (Date.now() - lastUpdateMs) / 1000)
+      displayElapsed = (status.elapsed_s ?? 0) + drift_s
+      displayEta = Math.max(0, (status.eta_s ?? 0) - drift_s)
+    }
+  }
+  const cap = status.wall_clock_cap_s ?? 1
+  const stepProgress = (status.step ?? 0) / Math.max(1, status.max_steps ?? 1)
+  const timeProgress = displayElapsed / cap
+  const progress = Math.min(1, Math.max(stepProgress, timeProgress))
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -196,8 +223,8 @@ export function TrainingPage() {
         <span style={{ background: stateColor, color: '#0b0e13', borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 600 }}>
           {status.state}
         </span>
-        <span style={{ color: 'var(--fg-dim)', fontSize: 13 }}>elapsed {fmt_s(status.elapsed_s)}</span>
-        <span style={{ color: 'var(--fg-dim)', fontSize: 13 }}>ETA {fmt_s(status.eta_s)}</span>
+        <span style={{ color: 'var(--fg-dim)', fontSize: 13 }}>elapsed {fmt_s(displayElapsed)}</span>
+        <span style={{ color: 'var(--fg-dim)', fontSize: 13 }}>ETA {fmt_s(displayEta)}</span>
         <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)', fontSize: 13 }}>
           {((progress) * 100).toFixed(1)}%
         </span>
