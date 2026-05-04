@@ -23,10 +23,13 @@ export function TrainingPage() {
   const lossChart = useRef<IChartApi | null>(null)
   const trainSeries = useRef<any>(null)
   const valSeries = useRef<any>(null)
+  const throughtputRef = useRef<HTMLDivElement>(null)
+  const throughputChart = useRef<IChartApi | null>(null)
+  const throughputSeries = useRef<any>(null)
   const [cursor, setCursor] = useState<number | null>(null)
   const [eventCount, setEventCount] = useState(0)
 
-  // Poll status every 3s
+  // Poll status every 2s
   useEffect(() => {
     let cancelled = false
     const poll = async () => {
@@ -37,7 +40,7 @@ export function TrainingPage() {
       if (!cancelled) setLoading(false)
     }
     poll()
-    const id = setInterval(poll, 3000)
+    const id = setInterval(poll, 2000)
     return () => { cancelled = true; clearInterval(id) }
   }, [])
 
@@ -66,8 +69,30 @@ export function TrainingPage() {
     return () => { ro.disconnect(); chart.remove() }
   }, [])
 
+  // Throughput sparkline chart
+  useEffect(() => {
+    if (!throughtputRef.current) return
+    const chart = createChart(throughtputRef.current, {
+      layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
+      grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
+      rightPriceScale: { borderColor: '#252d3d' },
+      timeScale: { borderColor: '#252d3d', timeVisible: false },
+      width: throughtputRef.current.clientWidth,
+      height: 100,
+    })
+    const ts = chart.addSeries(LineSeries, { color: '#9b59b6', lineWidth: 1 })
+    throughputChart.current = chart
+    throughputSeries.current = ts
+    const ro = new ResizeObserver(() => {
+      if (throughtputRef.current) chart.resize(throughtputRef.current.clientWidth, 100)
+    })
+    ro.observe(throughtputRef.current)
+    return () => { ro.disconnect(); chart.remove() }
+  }, [])
+
   const trainPoints = useRef<{time: number, value: number}[]>([])
   const valPoints = useRef<{time: number, value: number}[]>([])
+  const throughputPoints = useRef<{time: number, value: number}[]>([])
 
   const fetchEvents = useCallback(async () => {
     try {
@@ -77,6 +102,9 @@ export function TrainingPage() {
       for (const ev of res.events) {
         if (ev.kind === 'step' && ev.step != null && ev.loss != null) {
           trainPoints.current.push({ time: ev.step + 1000000, value: ev.loss })
+          if (ev.throughput_tok_per_s != null) {
+            throughputPoints.current.push({ time: ev.step + 1000000, value: ev.throughput_tok_per_s })
+          }
           changed = true
         }
         if (ev.kind === 'val' && ev.step != null && ev.val_loss != null) {
@@ -88,6 +116,10 @@ export function TrainingPage() {
         trainSeries.current?.setData([...trainPoints.current].sort((a, b) => a.time - b.time))
         valSeries.current?.setData([...valPoints.current].sort((a, b) => a.time - b.time))
         lossChart.current?.timeScale().fitContent()
+        if (throughputPoints.current.length > 0) {
+          throughputSeries.current?.setData([...throughputPoints.current].sort((a, b) => a.time - b.time))
+          throughputChart.current?.timeScale().fitContent()
+        }
         setEventCount(c => c + res.events.length)
       }
       if (res.cursor) setCursor(res.cursor)
@@ -178,6 +210,14 @@ export function TrainingPage() {
           Loss Curves — {eventCount} events loaded · <span style={{ color: '#00d4aa' }}>● train</span> <span style={{ color: '#f5a623' }}>● val</span>
         </div>
         <div ref={lossRef} style={{ width: '100%' }} />
+      </div>
+
+      {/* Throughput sparkline */}
+      <div className="card">
+        <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+          <span style={{ color: '#9b59b6' }}>● Throughput</span> tok/s over time
+        </div>
+        <div ref={throughtputRef} style={{ width: '100%' }} />
       </div>
 
       {/* Model spec */}

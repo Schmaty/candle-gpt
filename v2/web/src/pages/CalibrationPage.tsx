@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { createChart, type IChartApi, HistogramSeries } from 'lightweight-charts'
+import { createChart, type IChartApi, LineSeries } from 'lightweight-charts'
 import { fetchCalibration } from '../api'
 
 interface Bucket {
@@ -15,10 +15,8 @@ export function CalibrationPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const confChartRef = useRef<HTMLDivElement>(null)
-  const accChartRef = useRef<HTMLDivElement>(null)
-  const confChart = useRef<IChartApi | null>(null)
-  const accChart = useRef<IChartApi | null>(null)
+  const chartRef = useRef<HTMLDivElement>(null)
+  const chart = useRef<IChartApi | null>(null)
 
   useEffect(() => {
     fetchCalibration()
@@ -27,45 +25,38 @@ export function CalibrationPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  const chartOpts = (ref: React.RefObject<HTMLDivElement | null>) => ({
-    layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
-    grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
-    rightPriceScale: { borderColor: '#252d3d' },
-    timeScale: { borderColor: '#252d3d', timeVisible: false },
-    width: ref.current?.clientWidth ?? 400,
-    height: 180,
-  })
-
   useEffect(() => {
-    if (!confChartRef.current || !accChartRef.current || !data?.buckets?.length) return
+    if (!chartRef.current || !data?.buckets?.length) return
 
-    const cc = createChart(confChartRef.current, chartOpts(confChartRef))
-    const ac = createChart(accChartRef.current, chartOpts(accChartRef))
-    confChart.current = cc
-    accChart.current = ac
-
-    const confSeries = cc.addSeries(HistogramSeries, { color: '#00d4aa' })
-    const accSeries = ac.addSeries(HistogramSeries, { color: '#f5a623' })
-
-    // Use bucket index as time (lightweight-charts requires monotonically increasing time)
-    const confData = data.buckets.map((b, i) => ({ time: i + 1 as any, value: b.conf }))
-    const accData = data.buckets.map((b, i) => ({ time: i + 1 as any, value: b.acc }))
-
-    confSeries.setData(confData)
-    accSeries.setData(accData)
-    cc.timeScale().fitContent()
-    ac.timeScale().fitContent()
-
-    const ro1 = new ResizeObserver(() => {
-      if (confChartRef.current) cc.resize(confChartRef.current.clientWidth, 180)
+    const c = createChart(chartRef.current, {
+      layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
+      grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
+      rightPriceScale: { borderColor: '#252d3d' },
+      timeScale: { borderColor: '#252d3d', timeVisible: false },
+      width: chartRef.current.clientWidth,
+      height: 280,
     })
-    const ro2 = new ResizeObserver(() => {
-      if (accChartRef.current) ac.resize(accChartRef.current.clientWidth, 180)
-    })
-    if (confChartRef.current) ro1.observe(confChartRef.current)
-    if (accChartRef.current) ro2.observe(accChartRef.current)
+    chart.current = c
 
-    return () => { ro1.disconnect(); ro2.disconnect(); cc.remove(); ac.remove() }
+    // Actual accuracy per confidence bucket (teal line)
+    const actualSeries = c.addSeries(LineSeries, { color: '#00d4aa', lineWidth: 2, title: 'actual' })
+    // Perfect calibration diagonal (red dashed)
+    const idealSeries = c.addSeries(LineSeries, { color: '#f05252', lineWidth: 1, lineStyle: 2, title: 'ideal' })
+
+    // Use bucket index as monotonically increasing time (lw-charts requires this)
+    const actualData = data.buckets.map((b, i) => ({ time: i + 1 as any, value: b.acc }))
+    const idealData = data.buckets.map((b, i) => ({ time: i + 1 as any, value: b.conf }))
+
+    actualSeries.setData(actualData)
+    idealSeries.setData(idealData)
+    c.timeScale().fitContent()
+
+    const ro = new ResizeObserver(() => {
+      if (chartRef.current) c.resize(chartRef.current.clientWidth, 280)
+    })
+    ro.observe(chartRef.current)
+
+    return () => { ro.disconnect(); c.remove() }
   }, [data])
 
   if (loading) return <div style={{ color: 'var(--fg-dim)', padding: 24 }}>Loading calibration…</div>
@@ -88,19 +79,12 @@ export function CalibrationPage() {
         <div className="value">{data.ece.toFixed(4)}</div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-        <div className="card">
-          <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-            <span style={{ color: '#00d4aa' }}>● Avg Confidence</span> by bucket
-          </div>
-          <div ref={confChartRef} style={{ width: '100%' }} />
+      <div className="card">
+        <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginBottom: 8 }}>
+          <span style={{ color: '#00d4aa' }}>● Actual accuracy</span> per confidence bucket ·{' '}
+          <span style={{ color: '#f05252' }}>— Perfect calibration</span>
         </div>
-        <div className="card">
-          <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-            <span style={{ color: '#f5a623' }}>● Avg Accuracy</span> by bucket
-          </div>
-          <div ref={accChartRef} style={{ width: '100%' }} />
-        </div>
+        <div ref={chartRef} style={{ width: '100%' }} />
       </div>
 
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
