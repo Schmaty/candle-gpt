@@ -278,19 +278,30 @@ function TradeWheel({
   fmtPrice: (price: number) => string
 }) {
   // Direction signal in [-1, +1]: positive = up, negative = down.
-  const signal = p.p_up - p.p_down
+  // Two complementary measures:
+  //  - actionSignal (probability-mass based) drives the action verb (BUY/SELL/HOLD).
+  //  - needleZ (distribution-aware z-score of expected return) drives the dial needle so
+  //    it always points in the model's "average direction" even inside the hold zone.
+  const actionSignal = p.p_up - p.p_down
   const conf = p.confidence
 
-  // Decide what to recommend.
-  // Low confidence overrides every direction signal — never tell the user
-  // to act when the model is essentially guessing.
+  // Variance of the predicted return distribution: σ² = Σ p_i · (c_i − E[r])².
+  let variance = 0
+  for (let i = 0; i < p.probs.length; i++) {
+    const d = p.bin_centers[i] - p.expected_ret
+    variance += p.probs[i] * d * d
+  }
+  const distStd = Math.sqrt(Math.max(variance, 1e-12))
+  const zScore = p.expected_ret / distStd  // standardized expected return
+
+  // Decide what to recommend. Low confidence hard-overrides to HOLD.
   const verb =
     conf < 0.10 ? { label: 'HOLD',          color: 'var(--fg-dim)', sub: 'Model unsure — wait for conviction' } :
-    signal >= 0.30 ? { label: 'STRONG BUY', color: '#00d4aa', sub: 'Up bins dominate the distribution' } :
-    signal >= 0.10 ? { label: 'BUY',         color: '#00d4aa', sub: 'Mild up bias' } :
-    signal <= -0.30 ? { label: 'STRONG SELL', color: '#f05252', sub: 'Down bins dominate the distribution' } :
-    signal <= -0.10 ? { label: 'SELL',        color: '#f05252', sub: 'Mild down bias' } :
-                      { label: 'HOLD',         color: 'var(--fg-dim)', sub: 'Direction not committed' }
+    actionSignal >= 0.30 ? { label: 'STRONG BUY', color: '#00d4aa', sub: 'Up bins dominate the distribution' } :
+    actionSignal >= 0.10 ? { label: 'BUY',         color: '#00d4aa', sub: 'Mild up bias' } :
+    actionSignal <= -0.30 ? { label: 'STRONG SELL', color: '#f05252', sub: 'Down bins dominate the distribution' } :
+    actionSignal <= -0.10 ? { label: 'SELL',        color: '#f05252', sub: 'Mild down bias' } :
+                            { label: 'HOLD',         color: 'var(--fg-dim)', sub: 'Direction not committed' }
 
   // Confidence bucket label + color.
   const confBucket =
@@ -300,10 +311,13 @@ function TradeWheel({
     conf < 0.55 ? { label: 'high',      color: '#00d4aa' } :
                   { label: 'very high', color: '#00d4aa' }
 
-  // Needle math. We're drawing a 180° arc from -90° (Sell, far left) to +90° (Buy, far right).
-  // Clamp signal to [-1, 1] then map linearly to [-90°, +90°].
-  const clampedSignal = Math.max(-1, Math.min(1, signal))
-  const needleDeg = clampedSignal * 90  // -90 .. +90
+  // Needle math. 180° arc from −90° (Sell, far left) to +90° (Buy, far right).
+  // Equation:   θ = tanh(E[r] / σ) · 90°
+  // where E[r] = Σ pᵢ · cᵢ is the model's expected return and σ is the std-dev
+  // of that distribution. tanh squashes any z-score into (−1, 1) so the needle
+  // always points in the average direction without saturating instantly.
+  const tanh = (x: number) => Math.tanh(x)
+  const needleDeg = tanh(zScore) * 90
   const needleRad = (needleDeg - 90) * Math.PI / 180  // SVG: 0° points right, so subtract 90 to put 0 at top.
 
   // SVG geometry — half-circle dial.
@@ -414,6 +428,32 @@ function TradeWheel({
           {verb.label}
         </div>
         <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginTop: 2 }}>{verb.sub}</div>
+      </div>
+
+      {/* Needle equation */}
+      <div
+        title={
+          'Needle is the standardized expected return, squashed to (-1, 1) by tanh, then mapped to ±90°. ' +
+          'It always points in the model\'s average direction even when the action verb is HOLD.'
+        }
+        style={{
+          textAlign: 'center', marginTop: 10,
+          fontFamily: 'var(--font-mono)', fontSize: 11,
+          color: 'var(--fg-dim)', lineHeight: 1.6,
+        }}
+      >
+        <div>
+          θ = tanh(E[r] / σ) · 90° = tanh(
+          <span style={{ color: 'var(--fg)' }}>{p.expected_ret >= 0 ? '+' : ''}{(p.expected_ret * 1e4).toFixed(2)} bps</span>
+          {' / '}
+          <span style={{ color: 'var(--fg)' }}>{(distStd * 1e4).toFixed(2)} bps</span>
+          ) · 90°
+        </div>
+        <div style={{ marginTop: 2 }}>
+          z = <span style={{ color: 'var(--fg)' }}>{zScore.toFixed(3)}</span>
+          {'   →   '}
+          θ = <span style={{ color: verb.color }}>{needleDeg >= 0 ? '+' : ''}{needleDeg.toFixed(1)}°</span>
+        </div>
       </div>
 
       {/* Confidence bar */}
