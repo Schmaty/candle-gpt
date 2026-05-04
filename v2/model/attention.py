@@ -27,7 +27,8 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
-        assert C == self.cfg.d_model
+        if C != self.cfg.d_model:
+            raise ValueError(f"Input channels {C} != d_model {self.cfg.d_model}")
         q, k, v = self.qkv(x).split(C, dim=2)
         h = self.cfg.n_heads
         q = q.view(B, T, h, C // h).transpose(1, 2)

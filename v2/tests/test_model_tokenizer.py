@@ -74,3 +74,18 @@ def test_save_load_roundtrip(tmp_path: Path):
     assert tok2.n_bins == 64
     rets = np.array([-0.002, 0.0, 0.002])
     np.testing.assert_array_equal(tok.encode(rets), tok2.encode(rets))
+
+
+def test_fit_raises_on_empty_finite_input():
+    tok = ReturnTokenizerV2(n_bins=32)
+    with pytest.raises(ValueError, match="no finite values"):
+        tok.fit(np.array([np.nan, np.inf, -np.inf]))
+
+
+def test_fit_does_not_mutate_n_bins_on_duplicate_quantiles():
+    """With data that has many ties, n_bins must not change."""
+    tok = ReturnTokenizerV2(n_bins=32)
+    # All zeros — highly degenerate, would collapse with np.unique.
+    data = np.zeros(1000, dtype=np.float64)
+    tok.fit(data)
+    assert tok.n_bins == 32  # must NOT have silently shrunk

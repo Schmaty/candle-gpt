@@ -18,10 +18,12 @@ class ReturnTokenizerV2:
     def fit(self, log_returns: np.ndarray) -> None:
         data = np.asarray(log_returns, dtype=np.float64)
         data = data[np.isfinite(data)]
+        if len(data) == 0:
+            raise ValueError("fit() received no finite values; all inputs were NaN or Inf.")
         q = np.linspace(0.0, 1.0, self._n_bins + 1)
         breaks = np.quantile(data, q)
-        breaks = np.unique(breaks)
-        self._n_bins = len(breaks) - 1
+        # Do NOT deduplicate or mutate _n_bins — that causes model vocab mismatch.
+        # Duplicate breakpoints are handled correctly by np.digitize (ties go right).
         self.breakpoints = breaks
 
     def encode(self, log_returns: np.ndarray) -> np.ndarray:

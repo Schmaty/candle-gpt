@@ -90,3 +90,15 @@ def test_generate_returns_bin_ids():
         ids = model.generate_ids(x, n_steps=3, temperature=1.0)
     assert ids.shape == (1, 3)
     assert (ids >= 0).all() and (ids < cfg.n_bins).all()
+
+
+def test_generate_ids_preserves_training_mode():
+    """generate_ids() must not permanently flip the model to eval mode."""
+    cfg = _small_cfg()
+    model = CandleGPTv2(cfg)
+    model.train()
+    assert model.training
+    x = torch.randn(1, 4, 41)
+    with torch.no_grad():
+        model.generate_ids(x, n_steps=2)
+    assert model.training, "generate_ids() leaked eval mode"

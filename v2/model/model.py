@@ -37,8 +37,10 @@ class CandleGPTv2(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, _ = x.shape
-        assert T <= self.cfg.block_size, \
-            f"Sequence length {T} exceeds block_size {self.cfg.block_size}"
+        if T > self.cfg.block_size:
+            raise ValueError(
+                f"Sequence length {T} exceeds block_size {self.cfg.block_size}"
+            )
         pos = torch.arange(T, device=x.device)
         h = self.drop(self.input_proj(x) + self.pos_embed(pos))
         for block in self.blocks:
@@ -60,18 +62,22 @@ class CandleGPTv2(nn.Module):
         temperature: float = 1.0,
         top_k: int | None = None,
     ) -> torch.Tensor:
+        was_training = self.training
         self.eval()
-        out_ids = []
-        ctx = x
-        for _ in range(n_steps):
-            ctx_crop = ctx[:, -self.cfg.block_size:, :]
-            logits = self.forward(ctx_crop)
-            logits_last = logits[:, -1, :] / max(temperature, 1e-8)
-            if top_k is not None:
-                v, _ = torch.topk(logits_last, min(top_k, logits_last.size(-1)))
-                logits_last[logits_last < v[:, [-1]]] = float("-inf")
-            probs = F.softmax(logits_last, dim=-1)
-            ids = torch.multinomial(probs, num_samples=1)
-            out_ids.append(ids)
-            ctx = torch.cat([ctx, ctx[:, -1:, :]], dim=1)
-        return torch.cat(out_ids, dim=1)
+        try:
+            out_ids = []
+            ctx = x
+            for _ in range(n_steps):
+                ctx_crop = ctx[:, -self.cfg.block_size:, :]
+                logits = self.forward(ctx_crop)
+                logits_last = logits[:, -1, :] / max(temperature, 1e-8)
+                if top_k is not None:
+                    v, _ = torch.topk(logits_last, min(top_k, logits_last.size(-1)))
+                    logits_last[logits_last < v[:, [-1]]] = float("-inf")
+                probs = F.softmax(logits_last, dim=-1)
+                ids = torch.multinomial(probs, num_samples=1)
+                out_ids.append(ids)
+                ctx = torch.cat([ctx, ctx[:, -1:, :]], dim=1)
+            return torch.cat(out_ids, dim=1)
+        finally:
+            self.train(was_training)
