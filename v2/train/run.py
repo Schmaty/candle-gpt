@@ -26,6 +26,8 @@ def main() -> None:
     ap.add_argument("--raw-dir", type=Path, default=Path("v2/data/raw"))
     ap.add_argument("--runs-dir", type=Path, default=Path("v2/runs"))
     ap.add_argument("--eval-only", type=str, default=None)
+    ap.add_argument("--max-wall-clock-h", type=float, default=None,
+                    help="Override wall-clock cap in hours (default: TrainConfig's 6h)")
     args = ap.parse_args()
 
     cfg = TrainConfig(
@@ -36,6 +38,8 @@ def main() -> None:
         lr_max=args.lr_max,
         window=args.window,
     )
+    if args.max_wall_clock_h is not None:
+        cfg.max_wall_clock_s = args.max_wall_clock_h * 3600.0
     if args.run_id:
         cfg.run_id = args.run_id
 

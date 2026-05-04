@@ -41,11 +41,13 @@ class _Cache:
 class SweepService:
     """Lazy singleton that owns the model + test set for sweep / backtest."""
 
-    def __init__(self, run_dir: Path, kline_path: Path, funding_path: Path, liq_path: Path):
+    def __init__(self, run_dir: Path, kline_path: Path, funding_path: Path, liq_path: Path,
+                 ckpt_filename: str = "best_val.pt"):
         self.run_dir = run_dir
         self.kline_path = kline_path
         self.funding_path = funding_path
         self.liq_path = liq_path
+        self.ckpt_filename = ckpt_filename
         self._cache: Optional[_Cache] = None
         self._lock = threading.Lock()
 
@@ -55,7 +57,7 @@ class SweepService:
         with self._lock:
             if self._cache is not None:
                 return self._cache
-            ckpt_path = self.run_dir / "checkpoints" / "best_val.pt"
+            ckpt_path = self.run_dir / "checkpoints" / self.ckpt_filename
             tokenizer_path = self.run_dir / "tokenizer.pkl"
             if torch.cuda.is_available():
                 device = torch.device("cuda")

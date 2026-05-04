@@ -48,6 +48,12 @@ export async function runSweep(temperatures: number[], horizons: number[], nSamp
   if (!r.ok) throw new Error(`sweep: ${r.status} ${await r.text()}`)
   return r.json()
 }
+export async function getEvalHistory(runId?: string) {
+  const url = runId ? `${BASE}/eval_history?run_id=${encodeURIComponent(runId)}` : `${BASE}/eval_history`
+  const r = await fetch(url)
+  if (!r.ok) throw new Error(`eval_history: ${r.status}`)
+  return r.json()
+}
 export async function runBacktest(opts: {
   temperature: number; horizon: number; z_threshold: number;
   start_frac?: number; end_frac?: number; fee_bps?: number;

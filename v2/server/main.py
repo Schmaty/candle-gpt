@@ -133,6 +133,39 @@ def training_events(after: Optional[float] = None, limit: int = 5000):
     return training_view.read_events(after_ts=after, limit=limit)
 
 
+@app.get("/api/v2/eval_history")
+def eval_history(run_id: Optional[str] = None):
+    """Read v2/runs/<run_id>/eval_history.jsonl. If run_id is omitted,
+    we use the most-recent run that has a history file."""
+    target_dir: Optional[Path] = None
+    if run_id:
+        target_dir = RUNS_DIR / run_id
+    else:
+        if not RUNS_DIR.exists():
+            return {"available": False, "run_id": None, "entries": []}
+        candidates = []
+        for d in RUNS_DIR.iterdir():
+            if d.is_dir() and (d / "eval_history.jsonl").exists():
+                candidates.append(d)
+        if candidates:
+            target_dir = max(candidates, key=lambda p: p.stat().st_mtime)
+    if target_dir is None or not target_dir.exists():
+        return {"available": False, "run_id": run_id, "entries": []}
+    history_path = target_dir / "eval_history.jsonl"
+    entries = []
+    if history_path.exists():
+        with history_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(__import__("json").loads(line))
+                except Exception:
+                    continue
+    return {"available": True, "run_id": target_dir.name, "entries": entries}
+
+
 @app.get("/api/v2/calibration/sweep")
 def calibration_sweep(
     temperatures: str = "0.5,0.8,1.0,1.5,2.0",
