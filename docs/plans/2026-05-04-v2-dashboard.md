@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> **UI SUB-SKILL REQUIRED:** Before implementing ANY frontend component (Tasks 4–6), invoke `frontend-design:frontend-design` via the Skill tool. The UI must be intentional, dark-themed, and not generic-AI-looking. The skill guides typography, spacing, and component design decisions.
+> **UI SUB-SKILL REQUIRED:** Before implementing ANY frontend component (Tasks 4–6 and Task 6.5), invoke `frontend-design:frontend-design` via the Skill tool. The UI must be intentional, dark-themed, and not generic-AI-looking. The skill guides typography, spacing, and component design decisions.
+>
+> **PLAN AMENDED AFTER AUTHORSHIP (2026-05-04 ~08:30 PDT):** owner asked the dashboard to also show **live training progress** with deep analytics (specs, throughput, loss curves, ETA) AND simple progress bar — usable while training is in flight. New endpoints `/api/v2/training/status` and `/api/v2/training/events` plus a new **Training** tab have been added — see the new **Task 6.5: Training tab + live progress endpoints**. Tab order: Training → Live → History → Calibration → Regimes → Equity. Training data comes from `v2/runs/<run_id>/status.json` and `events.jsonl` (emitted by Plan 4 Task 2A); no model checkpoint is required for the Training tab to render.
 
-**Goal:** Ship a v2 dashboard as a separate FastAPI server on port 8766 (alongside v1's 8765) serving a new React+TS frontend with five tabs: Live prediction, History, Calibration, Regimes, and Equity curve. The v1 server is not modified. The v2 server loads the best-checkpoint model from Plan 4, serves live next-candle predictions, and pre-computes eval/calibration/regime data at startup from the REPORT.md and test dataset.
+**Goal:** Ship a v2 dashboard as a separate FastAPI server on port 8766 (alongside v1's 8765) serving a new React+TS frontend with **six** tabs: **Training (live progress, AMENDED)**, Live prediction, History, Calibration, Regimes, and Equity curve. The v1 server is not modified. The v2 server loads the best-checkpoint model from Plan 4, serves live next-candle predictions, pre-computes eval/calibration/regime data at startup from the REPORT.md and test dataset, **and tails the most recent training run's status.json + events.jsonl for the Training tab.**
 
 **Architecture:**
 - `v2/server/main.py` — FastAPI app on 0.0.0.0:8766; loads model + tokenizer at startup; serves pre-computed eval data + live inference.
@@ -1331,6 +1333,243 @@ export function EquityPage() {
 ```bash
 git add v2/web/src/pages/
 git commit -m "v2: web pages — History, Calibration, Regimes, Equity"
+```
+
+---
+
+## Task 6.5: Training tab + live progress endpoints (AMENDMENT — owner-mandated)
+
+**Why:** owner wants to watch training in the dashboard while it's running — progress bar, ETA, loss curves, hardware/model spec panel, sample predictions. The Training tab is the FIRST tab in the tab bar and renders even when no checkpoint exists yet (so it's useful from step 0 of a fresh run).
+
+The training loop already emits `v2/runs/<run_id>/status.json` and `events.jsonl` (Plan 4 Task 2A). This task wires those into the FastAPI server and adds the React tab.
+
+**Files:**
+- Create: `v2/server/training_view.py` — `TrainingView`: locates the most recent `v2/runs/<run_id>/`, exposes `read_status()` + `read_events(after_ts: float | None)` with simple in-process caching.
+- Modify: `v2/server/main.py` — add `/api/v2/training/status` and `/api/v2/training/events?after=<ts>` endpoints.
+- Modify: `v2/web/src/api.ts` — add `getTrainingStatus()` + `getTrainingEvents(afterTs)`.
+- Modify: `v2/web/src/components/TabBar.tsx` — add "Training" as tab #1.
+- Modify: `v2/web/src/App.tsx` — register the new route.
+- Create: `v2/web/src/pages/TrainingPage.tsx` — the actual tab content.
+- Create: `v2/web/src/components/ProgressBar.tsx` — shared progress bar primitive.
+- Create: `v2/web/src/components/SpecPanel.tsx` — shared key/value spec list.
+- Create: `v2/tests/test_training_endpoints.py` — server-side endpoint tests.
+
+**API addition:**
+
+```
+GET /api/v2/training/status
+  → { available: bool, run_id: str|null, state: str|null,
+      started_at_utc: str|null, last_update_utc: str|null,
+      elapsed_s: float|null, wall_clock_cap_s: float|null, eta_s: float|null,
+      step: int|null, max_steps: int|null, progress_frac: float|null,
+      train_loss: float|null, val_loss: float|null, best_val_loss: float|null,
+      lr: float|null, throughput_tok_per_s: float|null, grad_norm: float|null,
+      last_checkpoint_step: int|null, last_eval_step: int|null,
+      hardware: {hostname, platform, python, torch, device, device_name, cpu_count, ram_gb} | null,
+      model: {n_params, n_layers, n_heads, d_model, n_bins, window} | null }
+  available=false when no v2/runs/* exists yet — frontend then shows an empty state.
+
+GET /api/v2/training/events?after=<unix_ts>
+  → { events: [ {ts: float, kind: "step"|"val"|"checkpoint"|"sample", ...} ],
+      cursor: float }
+  Returns events with ts > after. cursor is the largest ts in the response (for the next call).
+```
+
+- [ ] **Step 1: Implement `training_view.py`**
+
+Path: `v2/server/training_view.py`:
+
+```python
+"""Read-only view over the most recent training run for the dashboard."""
+from __future__ import annotations
+import json
+from pathlib import Path
+from typing import Any, Optional
+
+
+class TrainingView:
+    def __init__(self, runs_dir: Path):
+        self.runs_dir = Path(runs_dir)
+
+    def _latest_run_dir(self) -> Optional[Path]:
+        if not self.runs_dir.exists():
+            return None
+        candidates = sorted(
+            (p for p in self.runs_dir.iterdir() if p.is_dir() and (p / "status.json").exists()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        return candidates[0] if candidates else None
+
+    def read_status(self) -> dict[str, Any]:
+        run = self._latest_run_dir()
+        if run is None:
+            return {"available": False, "run_id": None}
+        try:
+            data = json.loads((run / "status.json").read_text())
+            data["available"] = True
+            return data
+        except (OSError, json.JSONDecodeError):
+            # Mid-write race; treat as unavailable for this poll.
+            return {"available": False, "run_id": run.name}
+
+    def read_events(self, after_ts: Optional[float] = None,
+                    limit: int = 5000) -> dict[str, Any]:
+        run = self._latest_run_dir()
+        if run is None:
+            return {"events": [], "cursor": after_ts or 0.0}
+        events_path = run / "events.jsonl"
+        if not events_path.exists():
+            return {"events": [], "cursor": after_ts or 0.0}
+        out: list[dict[str, Any]] = []
+        cursor = after_ts or 0.0
+        with events_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = float(rec.get("ts", 0.0))
+                if after_ts is not None and ts <= after_ts:
+                    continue
+                out.append(rec)
+                if ts > cursor:
+                    cursor = ts
+                if len(out) >= limit:
+                    break
+        return {"events": out, "cursor": cursor}
+```
+
+- [ ] **Step 2: Wire endpoints in `main.py`**
+
+In `v2/server/main.py`, after the existing `/api/v2/...` endpoints:
+
+```python
+from v2.server.training_view import TrainingView
+
+training_view = TrainingView(Path("v2/runs"))
+
+
+@app.get("/api/v2/training/status")
+def training_status():
+    return training_view.read_status()
+
+
+@app.get("/api/v2/training/events")
+def training_events(after: float | None = None, limit: int = 5000):
+    return training_view.read_events(after_ts=after, limit=limit)
+```
+
+- [ ] **Step 3: Server tests**
+
+Path: `v2/tests/test_training_endpoints.py`:
+
+```python
+import json
+import time
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from v2.server.training_view import TrainingView
+
+
+def _seed_run(runs_dir: Path, run_id: str, status: dict, events: list[dict]) -> Path:
+    run = runs_dir / run_id
+    run.mkdir(parents=True)
+    (run / "status.json").write_text(json.dumps(status))
+    with (run / "events.jsonl").open("w") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+    return run
+
+
+def test_training_view_no_runs(tmp_path: Path):
+    tv = TrainingView(tmp_path)
+    s = tv.read_status()
+    assert s["available"] is False
+    assert tv.read_events()["events"] == []
+
+
+def test_training_view_picks_latest(tmp_path: Path):
+    _seed_run(tmp_path, "20260504_080000", {"step": 1}, [])
+    time.sleep(0.01)
+    _seed_run(tmp_path, "20260504_090000", {"step": 99}, [])
+    s = TrainingView(tmp_path).read_status()
+    assert s["available"] is True
+    assert s["step"] == 99
+
+
+def test_training_view_event_cursor(tmp_path: Path):
+    _seed_run(tmp_path, "r", {"step": 0}, [
+        {"ts": 1.0, "kind": "step", "loss": 5.0},
+        {"ts": 2.0, "kind": "step", "loss": 4.5},
+        {"ts": 3.0, "kind": "val",  "val_loss": 3.8},
+    ])
+    tv = TrainingView(tmp_path)
+    page1 = tv.read_events(after_ts=None)
+    assert [e["ts"] for e in page1["events"]] == [1.0, 2.0, 3.0]
+    page2 = tv.read_events(after_ts=2.0)
+    assert [e["ts"] for e in page2["events"]] == [3.0]
+    assert page2["cursor"] == 3.0
+```
+
+- [ ] **Step 4: Frontend — `TrainingPage.tsx` (use `frontend-design:frontend-design` skill first)**
+
+The page polls `/api/v2/training/status` every 2s and `/api/v2/training/events` with the latest cursor every 5s. Layout (top to bottom):
+
+1. **Header strip:** run id + state badge (color-coded: starting=blue, training=teal, evaluating=yellow, checkpointing=purple, done=green, failed=red), wall-clock elapsed `mm:ss`, ETA `mm:ss`, and a numeric progress percentage.
+2. **Progress bar** (the `ProgressBar` component): full-width, animated, showing `progress_frac`. Sub-label: `step / max_steps · best_val_loss = X · last_ckpt @ step Y`.
+3. **Two-column metrics row:**
+   - Left card: train_loss + val_loss + lr + grad_norm + throughput_tok_per_s + best_val_loss. Updated live.
+   - Right card: hardware specs (`SpecPanel`): hostname, device, device_name, torch version, ram, cpu_count.
+4. **Loss curves chart:** lightweight-charts line series with two series (train smoothed over 50 steps, val raw). X-axis = step. Y-axis = log loss.
+5. **Throughput chart:** small sparkline of throughput_tok_per_s over time.
+6. **Model spec panel:** another `SpecPanel` with model.n_params (formatted as `10.9 M`), n_layers, n_heads, d_model, n_bins, window.
+7. **Empty state:** when `available=false`, render a card that says "No training run yet — start one via `python -m v2.train.run`" with a small terminal icon.
+
+Use the existing chart wrapper component (`Chart.tsx`); add a `lineSeries` mode to it if it currently supports candle-only.
+
+- [ ] **Step 5: Add `Training` to TabBar (first slot) and wire the route in App.tsx**
+
+Tab order becomes: Training, Live, History, Calibration, Regimes, Equity. Default landing tab is Training when a training run exists, otherwise Live.
+
+- [ ] **Step 6: Run server + frontend tests**
+
+```bash
+cd projects/candle-gpt
+uv run pytest v2/tests/test_training_endpoints.py -q
+cd v2/web && npm run build
+```
+
+Expected: 3 endpoint tests pass; frontend builds with no TS errors.
+
+- [ ] **Step 7: Manual smoke check**
+
+With NO training run yet:
+```bash
+curl -s http://localhost:8766/api/v2/training/status | jq .
+```
+Expected: `{"available": false, "run_id": null}`. Tab renders the empty state.
+
+After Plan 4's smoke training has produced `v2/runs/<some_id>/status.json`:
+```bash
+curl -s http://localhost:8766/api/v2/training/status | jq .step
+curl -s 'http://localhost:8766/api/v2/training/events?after=0' | jq '.events | length'
+```
+Expected: a real step number and a non-empty events array.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add v2/server/training_view.py v2/server/main.py v2/web/src/pages/TrainingPage.tsx \
+        v2/web/src/components/ProgressBar.tsx v2/web/src/components/SpecPanel.tsx \
+        v2/web/src/components/TabBar.tsx v2/web/src/App.tsx v2/web/src/api.ts \
+        v2/tests/test_training_endpoints.py
+git commit -m "v2: dashboard — training tab + live progress endpoints"
 ```
 
 ---
