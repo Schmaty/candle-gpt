@@ -11,6 +11,12 @@ interface Candle {
   volume: number
 }
 
+interface PredictedPoint {
+  time: number
+  close: number
+  ret_bps: number
+}
+
 interface Prediction {
   top5_rets: number[]
   top5_probs: number[]
@@ -26,12 +32,14 @@ interface Prediction {
   entropy_bits: number
   max_entropy_bits: number
   confidence: number
+  predicted_path?: PredictedPoint[]
 }
 
 export function LivePage() {
   const chartRef = useRef<HTMLDivElement>(null)
   const chart = useRef<IChartApi | null>(null)
   const candleSeries = useRef<any>(null)
+  const predictionLine = useRef<any>(null)
   const [prediction, setPrediction] = useState<Prediction | null>(null)
   const [lastPrice, setLastPrice] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
@@ -54,8 +62,20 @@ export function LivePage() {
       borderUpColor: '#00d4aa', borderDownColor: '#f05252',
       wickUpColor: '#00d4aa', wickDownColor: '#f05252',
     })
+    // Dashed prediction line — gets data set whenever a new prediction arrives.
+    const pl = c.addSeries(LineSeries, {
+      color: '#f5a623',
+      lineWidth: 2,
+      lineStyle: 2,        // dashed
+      crosshairMarkerVisible: true,
+      crosshairMarkerRadius: 6,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      title: 'predicted',
+    })
     chart.current = c
     candleSeries.current = cs
+    predictionLine.current = pl
 
     const ro = new ResizeObserver(() => {
       if (chartRef.current) c.resize(chartRef.current.clientWidth, 380)
@@ -76,8 +96,22 @@ export function LivePage() {
           open: c.open, high: c.high, low: c.low, close: c.close,
         }))
         candleSeries.current?.setData(chartData)
-        chart.current?.timeScale().fitContent()
         setLastPrice(candles[candles.length - 1].close)
+
+        // Plot the model's predicted path: anchor at the last actual close,
+        // then the two future points (bar +1 and bar +2 in the chosen TF).
+        const path: PredictedPoint[] | undefined = data.prediction?.predicted_path
+        if (path && path.length > 0) {
+          const lastBar = candles[candles.length - 1]
+          const line = [
+            { time: lastBar.time as any, value: lastBar.close },
+            ...path.map(pt => ({ time: pt.time as any, value: pt.close })),
+          ]
+          predictionLine.current?.setData(line)
+        } else {
+          predictionLine.current?.setData([])
+        }
+        chart.current?.timeScale().fitContent()
       }
       setPrediction(data.prediction ?? null)
     } catch (e: any) {
@@ -133,6 +167,16 @@ export function LivePage() {
 
       {/* Chart */}
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+        <div style={{ padding: '10px 14px', fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #1c2230' }}>
+          BTC/USDT {interval} candles  ·  <span style={{ color: '#f5a623', textTransform: 'none', letterSpacing: 0 }}>— — — predicted path</span>
+          {prediction?.predicted_path && prediction.predicted_path.length === 2 && (
+            <span style={{ color: 'var(--fg-dim)', textTransform: 'none', letterSpacing: 0, marginLeft: 12, fontFamily: 'var(--font-mono)' }}>
+              t+1 ≈ ${prediction.predicted_path[0].close.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              {'  ·  '}
+              t+2 ≈ ${prediction.predicted_path[1].close.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+            </span>
+          )}
+        </div>
         <div ref={chartRef} style={{ width: '100%' }} />
       </div>
 

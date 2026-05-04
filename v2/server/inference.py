@@ -17,6 +17,12 @@ from v2.data.dataset import KlineWindowDataset
 
 BINANCE_KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
 
+INTERVAL_MS = {
+    "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+    "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000,
+    "4h": 14_400_000, "1d": 86_400_000,
+}
+
 
 class V2InferenceModel:
     def __init__(self) -> None:
@@ -146,6 +152,49 @@ class V2InferenceModel:
             confidence = max(0.0, 1.0 - entropy_bits / max_entropy_bits)  # 0..1
             last_close = float(window_candles[-1]["close"])
             expected_close = last_close * float(np.exp(expected_ret))
+
+            # 2-step autoregressive rollout for the chart overlay.
+            # Append a synthetic bar at the predicted close, recompute features,
+            # rerun the model — that gives a (rough) prediction for bar +2.
+            interval_ms = INTERVAL_MS.get(interval, 60_000)
+            last_open_ms = int(window_candles[-1]["open_time_ms"])
+            t1_open_ms = last_open_ms + interval_ms
+            t2_open_ms = t1_open_ms + interval_ms
+            try:
+                synth_volume = float(np.mean([float(c["volume"]) for c in window_candles[-10:]]))
+                synth_open = last_close
+                synth_close = expected_close
+                synth_high = max(synth_open, synth_close)
+                synth_low = min(synth_open, synth_close)
+                synth_row = pd.DataFrame([{
+                    "open_time": t1_open_ms,
+                    "open": synth_open, "high": synth_high, "low": synth_low,
+                    "close": synth_close, "volume": synth_volume,
+                    "close_time": t1_open_ms + interval_ms - 1,
+                    "regime": pd.array([-1], dtype="int8")[0],
+                    "funding_rate": 0.0001,
+                    "mark_price": synth_close,
+                    "minutes_until_funding": 240.0,
+                    "liq_count": 0.0, "liq_sum_notional": 0.0, "liq_max_single": 0.0,
+                    "long_liq_count": 0.0, "long_liq_notional": 0.0,
+                    "short_liq_count": 0.0, "short_liq_notional": 0.0,
+                }])[list(FEATURE_COLUMNS_WITH_JOIN)]
+                ext_df = pd.concat([df_kline, synth_row], ignore_index=True).iloc[-block_size:]
+                ext_feats_df = compute_features(ext_df)
+                ext_feats = torch.from_numpy(ext_feats_df.to_numpy(dtype=np.float32)).unsqueeze(0).to(self.device)
+                ext_logits = self.model(ext_feats)
+                ext_probs = F.softmax(ext_logits[0, -1, :], dim=-1).cpu().numpy()
+                expected_ret_t2 = float((ext_probs * bin_centers_arr).sum())
+                expected_close_t2 = synth_close * float(np.exp(expected_ret_t2))
+            except Exception as e:
+                print(f"[inference] 2-step rollout failed, falling back to linear: {e}")
+                expected_ret_t2 = expected_ret
+                expected_close_t2 = expected_close * float(np.exp(expected_ret))
+
+            predicted_path = [
+                {"time": t1_open_ms // 1000, "close": expected_close,    "ret_bps": expected_ret * 1e4},
+                {"time": t2_open_ms // 1000, "close": expected_close_t2, "ret_bps": expected_ret_t2 * 1e4},
+            ]
             return {
                 "candles": chart_candles,
                 "interval": interval,
@@ -164,6 +213,7 @@ class V2InferenceModel:
                     "entropy_bits": entropy_bits,
                     "max_entropy_bits": max_entropy_bits,
                     "confidence": confidence,
+                    "predicted_path": predicted_path,
                 },
             }
         except Exception as e:
