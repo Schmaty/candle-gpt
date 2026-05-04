@@ -1,11 +1,16 @@
 """Binance perpetual funding-rate fetcher.
 
-GET /fapi/v1/fundingRate — paginated, max 1000 rows per request, walks forward
-in time. Stores to parquet via store.write_funding (which embeds schema metadata).
+Primary source: Binance public data (data.binance.vision) monthly + daily zip files.
+Fallback (geo-restricted regions): GET /fapi/v1/fundingRate paginated API.
+
+Stores to parquet via store.write_funding (which embeds schema metadata).
 """
 from __future__ import annotations
 import argparse
+import io
 import time
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -20,6 +25,7 @@ from v2.data.store import funding_parquet_path, write_funding
 
 
 BINANCE_FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
+BINANCE_PUBLIC_DATA_BASE = "https://data.binance.vision/data/futures/um"
 MAX_LIMIT = 1000  # Binance hard cap
 
 
@@ -41,6 +47,89 @@ def _fetch_chunk(symbol: str, start_ms: int, limit: int = MAX_LIMIT) -> list[dic
     r = requests.get(BINANCE_FUNDING_URL, params=params, timeout=30)
     r.raise_for_status()
     return r.json()
+
+
+def _download_public_zip(url: str) -> pd.DataFrame | None:
+    """Download a monthly/daily funding rate zip and return parsed DataFrame or None."""
+    r = requests.get(url, timeout=60)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        name = zf.namelist()[0]
+        with zf.open(name) as f:
+            df = pd.read_csv(f)
+    # Public data columns: calc_time, funding_interval_hours, last_funding_rate
+    df = df.rename(columns={"calc_time": "funding_time", "last_funding_rate": "funding_rate"})
+    df["funding_time"] = df["funding_time"].astype("int64")
+    df["funding_rate"] = df["funding_rate"].astype("float64")
+    df["mark_price"] = float("nan")  # not provided in public data
+    return df[list(FUNDING_COLUMNS)]
+
+
+def fetch_funding_from_public_data(
+    asset: Asset,
+    target_start_ms: int,
+    end_ms: int,
+    out_path: Path,
+) -> pd.DataFrame:
+    """Download monthly + daily funding-rate CSVs from data.binance.vision."""
+    symbol = asset.value
+    start_dt = datetime.fromtimestamp(target_start_ms / 1000, tz=timezone.utc)
+    end_dt = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
+
+    frames: list[pd.DataFrame] = []
+
+    # Monthly files from start year-month through end year-month
+    year, month = start_dt.year, start_dt.month
+    while (year, month) <= (end_dt.year, end_dt.month):
+        ym = f"{year:04d}-{month:02d}"
+        url = f"{BINANCE_PUBLIC_DATA_BASE}/monthly/fundingRate/{symbol}/{symbol}-fundingRate-{ym}.zip"
+        df = _download_public_zip(url)
+        if df is not None and not df.empty:
+            frames.append(df)
+        # advance month
+        if month == 12:
+            year += 1
+            month = 1
+        else:
+            month += 1
+
+    # Daily files for current month (monthly archives lag ~1 month)
+    today = datetime.now(tz=timezone.utc)
+    d = datetime(end_dt.year, end_dt.month, 1, tzinfo=timezone.utc)
+    while d.date() < today.date():
+        ds = d.strftime("%Y-%m-%d")
+        url = f"{BINANCE_PUBLIC_DATA_BASE}/daily/fundingRate/{symbol}/{symbol}-fundingRate-{ds}.zip"
+        df = _download_public_zip(url)
+        if df is not None and not df.empty:
+            frames.append(df)
+        d = datetime(d.year, d.month + 1 if d.month < 12 else 1,
+                     1 if d.month < 12 else 1,
+                     tzinfo=timezone.utc) if d.day == 1 else \
+            datetime(d.year, d.month, d.day + 1, tzinfo=timezone.utc)
+
+    if not frames:
+        raise RuntimeError(f"No public funding data found for {symbol}")
+
+    df_all = (
+        pd.concat(frames, ignore_index=True)
+          .drop_duplicates(subset=["funding_time"], keep="first")
+          .sort_values("funding_time", kind="mergesort")
+          .reset_index(drop=True)
+    )
+    # Filter to requested window
+    df_all = df_all[
+        (df_all["funding_time"] >= target_start_ms) &
+        (df_all["funding_time"] < end_ms)
+    ].reset_index(drop=True)
+
+    for col, dtype in FUNDING_DTYPES.items():
+        if col != "mark_price":  # mark_price is NaN float64, already correct
+            df_all[col] = df_all[col].astype(dtype)
+
+    write_funding(df_all, out_path)
+    return df_all
 
 
 def fetch_funding_to_parquet(
@@ -94,6 +183,8 @@ def main() -> None:
     ap.add_argument("--root", type=Path,
                     default=Path(__file__).parent / "raw",
                     help="output dir (parquet path = root / funding_<symbol>.parquet)")
+    ap.add_argument("--use-api", action="store_true",
+                    help="Use fapi REST API instead of public data (may be geo-blocked)")
     args = ap.parse_args()
 
     asset = Asset(args.asset)
@@ -101,12 +192,21 @@ def main() -> None:
     now_ms = int(time.time() * 1000)
     target_start_ms = now_ms - int(args.years * 365 * 24 * 60 * 60 * 1000)
     print(f"Fetching funding for {asset.value} ({args.years} years) → {out_path}")
-    df = fetch_funding_to_parquet(
-        asset=asset,
-        target_start_ms=target_start_ms,
-        end_ms=now_ms,
-        out_path=out_path,
-    )
+
+    if args.use_api:
+        df = fetch_funding_to_parquet(
+            asset=asset,
+            target_start_ms=target_start_ms,
+            end_ms=now_ms,
+            out_path=out_path,
+        )
+    else:
+        df = fetch_funding_from_public_data(
+            asset=asset,
+            target_start_ms=target_start_ms,
+            end_ms=now_ms,
+            out_path=out_path,
+        )
     print(f"Done. {len(df)} funding events saved.")
 
 
