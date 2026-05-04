@@ -125,7 +125,7 @@ export function LivePage() {
         <button onClick={load} disabled={loading}>{loading ? 'Loading…' : 'Refresh'}</button>
         {interval !== '1m' && (
           <span style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            chart {interval} · prediction is for the next 1m bar
+            model trained on 1m — running on {interval} (assumes pattern transfer)
           </span>
         )}
         {error && <span style={{ color: 'var(--red)', fontSize: 12 }}>{error}</span>}
@@ -138,7 +138,7 @@ export function LivePage() {
 
       {/* Prediction */}
       {prediction ? (
-        <PredictionCard p={prediction} ret2pct={ret2pct} ret2bps={ret2bps} fmtPrice={fmtPrice} />
+        <PredictionCard p={prediction} interval={interval} ret2pct={ret2pct} ret2bps={ret2bps} fmtPrice={fmtPrice} />
       ) : (
         <div className="card" style={{ color: 'var(--fg-dim)', fontSize: 13 }}>
           No model loaded — predictions unavailable. Train a model first.
@@ -150,11 +150,13 @@ export function LivePage() {
 
 function PredictionCard({
   p,
+  interval,
   ret2pct,
   ret2bps,
   fmtPrice,
 }: {
   p: Prediction
+  interval: string
   ret2pct: (r: number) => string
   ret2bps: (r: number) => string
   fmtPrice: (p: number) => string
@@ -189,7 +191,7 @@ function PredictionCard({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <TradeWheel p={p} ret2bps={ret2bps} fmtPrice={fmtPrice} />
+      <TradeWheel p={p} interval={interval} ret2bps={ret2bps} fmtPrice={fmtPrice} />
 
       <div className="card">
         <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>
@@ -199,7 +201,7 @@ function PredictionCard({
         {/* Headline */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 18 }}>
           <div>
-            <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 4 }}>Direction (1 min ahead)</div>
+            <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 4 }}>Direction ({interval} ahead)</div>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
               <span style={{ fontSize: 26, fontWeight: 700, color: direction.color, fontFamily: 'var(--font-mono)' }}>
                 {direction.label}
@@ -290,10 +292,12 @@ function PredictionCard({
 
 function TradeWheel({
   p,
+  interval,
   ret2bps,
   fmtPrice,
 }: {
   p: Prediction
+  interval: string
   ret2bps: (r: number) => string
   fmtPrice: (price: number) => string
 }) {
@@ -380,7 +384,7 @@ function TradeWheel({
   return (
     <div className="card" style={{ padding: '20px 24px' }}>
       <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>
-        Trade analysis — next 1m bar
+        Trade analysis — next {interval} bar
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'center' }}>

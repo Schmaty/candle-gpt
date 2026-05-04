@@ -80,22 +80,21 @@ class V2InferenceModel:
 
     @torch.no_grad()
     def predict_live(self, limit: int = 300, interval: str = "1m") -> dict:
-        # Chart candles in the requested interval (1m / 5m / 15m / 1h / 4h / 1d).
-        chart_raw = self._fetch_recent_binance(limit=max(limit, 60), interval=interval)
+        # We need at least block_size bars of history to feed the model.
+        block_size = self.model.cfg.block_size if self.model is not None else 520
+        fetch_limit = max(limit, block_size + 10)
+        chart_raw = self._fetch_recent_binance(limit=fetch_limit, interval=interval)
         chart_candles = chart_raw[-limit:] if chart_raw else []
         if self.model is None or self.tokenizer is None:
             return {"candles": chart_candles, "prediction": None, "interval": interval}
-        # Prediction is always computed against 1m bars since the model is 1m-trained.
-        # When the user is viewing a higher timeframe, we still surface the
-        # next-1m-bar prediction (the dashboard labels it as such).
-        if interval == "1m" and chart_raw and len(chart_raw) >= 520:
-            candles_1m = chart_raw
-        else:
-            candles_1m = self._fetch_recent_binance(limit=520, interval="1m")
-        if not candles_1m:
+        if not chart_raw:
             return {"candles": chart_candles, "prediction": None, "interval": interval}
-        block_size = self.model.cfg.block_size
-        window_candles = candles_1m[-block_size:]
+        # Run the model on whatever interval the user chose. The model was
+        # trained on 1m bars but the architecture is timeframe-agnostic; we
+        # rely on the assumption that local return patterns transfer to
+        # higher TFs. Quality may degrade — UI labels the prediction with
+        # the actual interval so the user knows what they're looking at.
+        window_candles = chart_raw[-block_size:]
         if len(window_candles) < 10:
             return {"candles": chart_candles, "prediction": None}
         try:
