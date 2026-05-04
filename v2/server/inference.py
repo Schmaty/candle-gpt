@@ -56,10 +56,10 @@ class V2InferenceModel:
             print(f"[inference] load failed: {e}")
             return False
 
-    def _fetch_recent_binance(self, limit: int = 520) -> list[dict]:
+    def _fetch_recent_binance(self, limit: int = 520, interval: str = "1m") -> list[dict]:
         try:
             end_ms = int(time.time() * 1000)
-            params = {"symbol": "BTCUSDT", "interval": "1m", "limit": limit, "endTime": end_ms}
+            params = {"symbol": "BTCUSDT", "interval": interval, "limit": limit, "endTime": end_ms}
             r = requests.get(BINANCE_KLINES_URL, params=params, timeout=15)
             r.raise_for_status()
             out = []
@@ -79,15 +79,23 @@ class V2InferenceModel:
             return []
 
     @torch.no_grad()
-    def predict_live(self, limit: int = 300) -> dict:
-        candles = self._fetch_recent_binance(limit=max(limit, 520))
-        if not candles:
-            return {"candles": [], "prediction": None}
-        chart_candles = candles[-limit:]
+    def predict_live(self, limit: int = 300, interval: str = "1m") -> dict:
+        # Chart candles in the requested interval (1m / 5m / 15m / 1h / 4h / 1d).
+        chart_raw = self._fetch_recent_binance(limit=max(limit, 60), interval=interval)
+        chart_candles = chart_raw[-limit:] if chart_raw else []
         if self.model is None or self.tokenizer is None:
-            return {"candles": chart_candles, "prediction": None}
+            return {"candles": chart_candles, "prediction": None, "interval": interval}
+        # Prediction is always computed against 1m bars since the model is 1m-trained.
+        # When the user is viewing a higher timeframe, we still surface the
+        # next-1m-bar prediction (the dashboard labels it as such).
+        if interval == "1m" and chart_raw and len(chart_raw) >= 520:
+            candles_1m = chart_raw
+        else:
+            candles_1m = self._fetch_recent_binance(limit=520, interval="1m")
+        if not candles_1m:
+            return {"candles": chart_candles, "prediction": None, "interval": interval}
         block_size = self.model.cfg.block_size
-        window_candles = candles[-block_size:]
+        window_candles = candles_1m[-block_size:]
         if len(window_candles) < 10:
             return {"candles": chart_candles, "prediction": None}
         try:
@@ -141,6 +149,7 @@ class V2InferenceModel:
             expected_close = last_close * float(np.exp(expected_ret))
             return {
                 "candles": chart_candles,
+                "interval": interval,
                 "prediction": {
                     "probs": probs.tolist(),
                     "top5_rets": top5_rets,
@@ -160,4 +169,4 @@ class V2InferenceModel:
             }
         except Exception as e:
             print(f"[inference] predict_live failed: {e}")
-            return {"candles": chart_candles, "prediction": None}
+            return {"candles": chart_candles, "prediction": None, "interval": interval}

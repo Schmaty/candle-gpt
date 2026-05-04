@@ -37,6 +37,7 @@ export function LivePage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [limit, setLimit] = useState(300)
+  const [interval, setIntervalTf] = useState<'1m' | '5m' | '15m' | '1h' | '4h' | '1d'>('1m')
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -67,7 +68,7 @@ export function LivePage() {
     setLoading(true)
     setError(null)
     try {
-      const data = await fetchCandles(limit)
+      const data = await fetchCandles(limit, interval)
       const candles: Candle[] = data.candles ?? []
       if (candles.length > 0) {
         const chartData = candles.map(c => ({
@@ -86,12 +87,12 @@ export function LivePage() {
     }
   }
 
-  useEffect(() => { load() }, [limit])
+  useEffect(() => { load() }, [limit, interval])
 
   useEffect(() => {
     const id = setInterval(load, 30_000)
     return () => clearInterval(id)
-  }, [limit])
+  }, [limit, interval])
 
   const ret2pct = (r: number) => `${r >= 0 ? '+' : ''}${(r * 100).toFixed(3)}%`
   const ret2bps = (r: number) => `${r >= 0 ? '+' : ''}${(r * 10000).toFixed(2)} bps`
@@ -100,14 +101,33 @@ export function LivePage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {/* Toolbar */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 18, color: 'var(--accent)' }}>
           BTC/USDT {lastPrice != null ? `$${lastPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ''}
         </span>
-        {[100, 200, 300, 500].map(l => (
-          <button key={l} className={limit === l ? 'active' : ''} onClick={() => setLimit(l)}>{l}m</button>
-        ))}
+
+        {/* Timeframe selector */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 4 }}>TF</span>
+          {(['1m', '5m', '15m', '1h', '4h', '1d'] as const).map(tf => (
+            <button key={tf} className={interval === tf ? 'active' : ''} onClick={() => setIntervalTf(tf)}>{tf}</button>
+          ))}
+        </div>
+
+        {/* Bar-count selector */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 4 }}>Bars</span>
+          {[100, 200, 300, 500].map(l => (
+            <button key={l} className={limit === l ? 'active' : ''} onClick={() => setLimit(l)}>{l}</button>
+          ))}
+        </div>
+
         <button onClick={load} disabled={loading}>{loading ? 'Loading…' : 'Refresh'}</button>
+        {interval !== '1m' && (
+          <span style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
+            chart {interval} · prediction is for the next 1m bar
+          </span>
+        )}
         {error && <span style={{ color: 'var(--red)', fontSize: 12 }}>{error}</span>}
       </div>
 

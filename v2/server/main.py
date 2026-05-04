@@ -74,11 +74,16 @@ def status():
     }
 
 
+_ALLOWED_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"}
+
+
 @app.get("/api/v2/candles")
-def candles(limit: int = 300):
+def candles(limit: int = 300, interval: str = "1m"):
     limit = max(50, min(int(limit), 520))
+    if interval not in _ALLOWED_INTERVALS:
+        raise HTTPException(400, f"interval must be one of {sorted(_ALLOWED_INTERVALS)}")
     try:
-        result = inference.predict_live(limit=limit)
+        result = inference.predict_live(limit=limit, interval=interval)
     except Exception as e:
         raise HTTPException(502, f"predict_live failed: {e}")
     return result

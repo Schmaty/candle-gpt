@@ -5,8 +5,8 @@ export async function fetchStatus() {
   if (!r.ok) throw new Error(`status: ${r.status}`)
   return r.json()
 }
-export async function fetchCandles(limit = 300) {
-  const r = await fetch(`${BASE}/candles?limit=${limit}`)
+export async function fetchCandles(limit = 300, interval = '1m') {
+  const r = await fetch(`${BASE}/candles?limit=${limit}&interval=${encodeURIComponent(interval)}`)
   if (!r.ok) throw new Error(`candles: ${r.status}`)
   return r.json()
 }
