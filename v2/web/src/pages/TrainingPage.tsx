@@ -410,26 +410,30 @@ function SystemStatsPanel() {
         </div>
       )}
 
-      {/* Thermal + fan */}
+      {/* Thermal + power */}
       <div style={{ marginTop: 16, padding: '10px 14px', background: '#0e1620', border: '1px solid #1c2230', borderRadius: 6 }}>
         <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-          Thermal + fan
+          Thermal + power
         </div>
         {thermal.available ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
-            <Stat label="CPU temp" value={cpuTemp != null ? `${cpuTemp.toFixed(1)} °C` : '—'} color={cpuTemp != null && cpuTemp > 90 ? '#f05252' : 'var(--fg)'} />
-            <Stat label="GPU temp" value={gpuTemp != null ? `${gpuTemp.toFixed(1)} °C` : '—'} color={gpuTemp != null && gpuTemp > 90 ? '#f05252' : 'var(--fg)'} />
-            <Stat label="Fan speed" value={fan != null ? `${Math.round(fan)} rpm` : '—'} />
-          </div>
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+              <ThermalPressure level={thermal.pressure_level} />
+              <Stat label="GPU power" value={thermal.gpu_power_mw != null ? `${(thermal.gpu_power_mw / 1000).toFixed(2)} W` : '—'} color="#00d4aa" />
+              <Stat label="CPU power" value={thermal.cpu_power_mw != null ? `${(thermal.cpu_power_mw / 1000).toFixed(2)} W` : '—'} color="#4a90e2" />
+            </div>
+            {thermal.gpu_freq_mhz != null && (
+              <div style={{ marginTop: 8, fontSize: 11, color: 'var(--fg-dim)', fontFamily: 'var(--font-mono)' }}>
+                GPU active freq: {thermal.gpu_freq_mhz} MHz
+              </div>
+            )}
+            <div style={{ marginTop: 10, fontSize: 11, color: 'var(--fg-dim)', lineHeight: 1.5 }}>
+              Apple Silicon doesn't expose CPU/GPU die temperatures or fan RPM through public macOS APIs. Pressure level and power draw are the available proxies — anything above Nominal pressure means the system is downclocking to manage heat.
+            </div>
+          </>
         ) : (
           <div style={{ fontSize: 12, color: 'var(--fg-dim)', lineHeight: 1.6 }}>
-            Temperature and fan readings need <code style={{ fontFamily: 'var(--font-mono)' }}>sudo powermetrics</code>.
-            To enable, add a passwordless sudo entry:
-            <pre style={{ margin: '6px 0 0', padding: '8px 10px', background: '#0b0e13', borderRadius: 4, fontSize: 11, color: 'var(--fg)', overflowX: 'auto' }}>
-{`echo "$USER ALL=(root) NOPASSWD: /usr/bin/powermetrics" | sudo tee /etc/sudoers.d/powermetrics
-sudo chmod 440 /etc/sudoers.d/powermetrics`}
-            </pre>
-            Restart the v2 server after adding it.
+            {thermal.hint || 'Thermal readings unavailable.'}
           </div>
         )}
       </div>
@@ -465,6 +469,26 @@ function Stat({ label, value, color }: { label: string; value: string; color?: s
     <div>
       <div style={{ fontSize: 10, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
       <div style={{ fontSize: 18, fontFamily: 'var(--font-mono)', color: color ?? 'var(--fg)', marginTop: 2 }}>{value}</div>
+    </div>
+  )
+}
+
+function ThermalPressure({ level }: { level: string | null | undefined }) {
+  const color =
+    level === 'Critical' ? '#f05252' :
+    level === 'Serious'  ? '#f58423' :
+    level === 'Fair'     ? '#f5a623' :
+    level === 'Nominal'  ? '#00d4aa' :
+                           'var(--fg-dim)'
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+        Thermal pressure
+      </div>
+      <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ width: 10, height: 10, borderRadius: '50%', background: color }} />
+        <span style={{ fontSize: 18, fontFamily: 'var(--font-mono)', color }}>{level ?? '—'}</span>
+      </div>
     </div>
   )
 }

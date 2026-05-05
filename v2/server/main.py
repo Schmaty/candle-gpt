@@ -30,21 +30,34 @@ sweep_service: Optional[SweepService] = None
 
 
 def _find_best_run() -> tuple[Optional[Path], Optional[Path]]:
-    current_id_file = PROJECT_ROOT / "v2" / "current_run_id.txt"
-    if current_id_file.exists():
-        run_id = current_id_file.read_text().strip()
-        ckpt = RUNS_DIR / run_id / "checkpoints" / "best_val.pt"
-        tok = RUNS_DIR / run_id / "tokenizer.pkl"
-        if ckpt.exists() and tok.exists():
-            return ckpt, tok
-    for run_dir in sorted(RUNS_DIR.iterdir() if RUNS_DIR.exists() else [], reverse=True):
-        if not run_dir.is_dir():
-            continue
-        ckpt = run_dir / "checkpoints" / "best_val.pt"
-        tok = run_dir / "tokenizer.pkl"
-        if ckpt.exists() and tok.exists():
-            return ckpt, tok
-    return None, None
+    # Training writes the active run id to v2/runs/current_run_id.txt
+    # (some older runs left a stale copy at v2/current_run_id.txt — try both
+    # but prefer the current one).
+    for current_id_file in (RUNS_DIR / "current_run_id.txt",
+                            PROJECT_ROOT / "v2" / "current_run_id.txt"):
+        if current_id_file.exists():
+            run_id = current_id_file.read_text().strip()
+            ckpt = RUNS_DIR / run_id / "checkpoints" / "best_val.pt"
+            tok = RUNS_DIR / run_id / "tokenizer.pkl"
+            if ckpt.exists() and tok.exists():
+                return ckpt, tok
+    # Fallback: most-recently-modified run dir that has both files. Use
+    # checkpoint mtime (not dir mtime) because dir mtime gets stamped only
+    # on file create, not on append/replace.
+    candidates = []
+    if RUNS_DIR.exists():
+        for run_dir in RUNS_DIR.iterdir():
+            if not run_dir.is_dir():
+                continue
+            ckpt = run_dir / "checkpoints" / "best_val.pt"
+            tok = run_dir / "tokenizer.pkl"
+            if ckpt.exists() and tok.exists():
+                candidates.append((ckpt.stat().st_mtime, ckpt, tok))
+    if not candidates:
+        return None, None
+    candidates.sort(reverse=True)
+    _, ckpt, tok = candidates[0]
+    return ckpt, tok
 
 
 @asynccontextmanager
@@ -236,7 +249,7 @@ def backtest(
     z_threshold: float = 0.3,
     start_frac: float = 0.0,
     end_frac: float = 1.0,
-    fee_bps: float = 1.0,
+    fee_bps: float = 0.0,
 ):
     """Run a long/short backtest over a slice of the test set with the
     chosen settings. Returns equity curve + summary stats."""

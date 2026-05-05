@@ -49,7 +49,7 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
   // and the backtest takes 0 trades. Start at 0 (always-on) and the user
   // can dial up to find a confidence threshold that actually fires.
   const [zThreshold, setZThreshold] = useState(0.0)
-  const [feeBps, setFeeBps] = useState(1.0)
+  const [feeBps, setFeeBps] = useState(0.0)
   const [startFrac, setStartFrac] = useState(0)
   const [endFrac, setEndFrac] = useState(1)
   const [running, setRunning] = useState(false)

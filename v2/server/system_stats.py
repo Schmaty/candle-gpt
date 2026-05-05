@@ -45,50 +45,78 @@ def _read_gpu_util() -> Optional[float]:
     return float(max(matches))
 
 
-def _read_cpu_temp_via_powermetrics(timeout: float = 2.0) -> dict[str, Any]:
-    """Try `sudo -n powermetrics --samplers smc -i 200 -n 1`.
+def _read_thermal_via_powermetrics(timeout: float = 2.0) -> dict[str, Any]:
+    """Run `sudo -n powermetrics --samplers thermal,gpu_power,cpu_power -i 200 -n 1`
+    and parse thermal pressure level + GPU/CPU power.
 
-    Returns a dict with whatever we could parse. Keys all optional:
-      cpu_temp_c, gpu_temp_c, fan_rpm, available, hint
+    Apple Silicon (M-series) does NOT expose CPU/GPU die temperatures or fan
+    RPM through powermetrics or public ioreg keys — those readings live behind
+    SMC keys that only third-party tools using private APIs (iStat, smctemp,
+    asitop) can read. We return what IS available and surface the rest as a
+    null value with an explanatory hint.
     """
     if not shutil.which("powermetrics"):
         return {"available": False, "hint": "powermetrics not installed"}
     try:
         out = subprocess.check_output(
-            ["sudo", "-n", "powermetrics", "--samplers", "smc,thermal",
-             "-i", "200", "-n", "1", "-f", "plist"],
+            ["sudo", "-n", "powermetrics",
+             "--samplers", "thermal,gpu_power,cpu_power",
+             "-i", "200", "-n", "1"],
             stderr=subprocess.DEVNULL,
             timeout=timeout,
         )
     except subprocess.CalledProcessError:
         return {
             "available": False,
-            "hint": "powermetrics requires sudo. Add a NOPASSWD entry in /etc/sudoers.d/powermetrics: '<user> ALL=(root) NOPASSWD: /usr/bin/powermetrics'",
+            "hint": "powermetrics requires passwordless sudo. Run: echo \"$USER ALL=(root) NOPASSWD: /usr/bin/powermetrics\" | sudo tee /etc/sudoers.d/powermetrics && sudo chmod 440 /etc/sudoers.d/powermetrics",
         }
     except (subprocess.SubprocessError, OSError):
         return {"available": False, "hint": "powermetrics call failed"}
-    # The plist output is verbose; parse the bits we care about defensively.
     text = out.decode("utf-8", errors="replace")
-    cpu_temp = None
-    gpu_temp = None
-    fan_rpm = None
-    for m in re.finditer(r"<key>(?P<k>[^<]+)</key>\s*<real>(?P<v>[-\d.]+)</real>", text):
-        k = m.group("k").lower()
-        v = float(m.group("v"))
-        if "cpu_die" in k or k.endswith("cpu_die_temperature_c"):
-            cpu_temp = v
-        elif "gpu_die" in k or k.endswith("gpu_die_temperature_c"):
-            gpu_temp = v
-        elif k.endswith("fan_speed") or k == "fan_rpm":
-            fan_rpm = v
-    fan_match = _FAN_RE.search(text)
-    if fan_match and fan_rpm is None:
-        fan_rpm = float(fan_match.group(1))
+
+    # Thermal pressure level: Nominal / Fair / Serious / Critical
+    pressure = None
+    m = re.search(r"Current pressure level:\s*(\w+)", text)
+    if m:
+        pressure = m.group(1)
+
+    # GPU power in mW
+    gpu_power_mw = None
+    m = re.search(r"GPU Power:\s*(\d+)\s*mW", text)
+    if m:
+        gpu_power_mw = int(m.group(1))
+
+    # GPU active frequency
+    gpu_freq_mhz = None
+    m = re.search(r"GPU HW active frequency:\s*(\d+)\s*MHz", text)
+    if m:
+        gpu_freq_mhz = int(m.group(1))
+
+    # CPU power totals (sum of E and P clusters when reported separately)
+    cpu_power_mw = 0
+    cpu_power_seen = False
+    for m in re.finditer(r"(?:E|P)-Cluster Power:\s*(\d+)\s*mW", text):
+        cpu_power_mw += int(m.group(1))
+        cpu_power_seen = True
+    if not cpu_power_seen:
+        m = re.search(r"CPU Power:\s*(\d+)\s*mW", text)
+        if m:
+            cpu_power_mw = int(m.group(1))
+            cpu_power_seen = True
+    if not cpu_power_seen:
+        cpu_power_mw = None  # type: ignore
+
     return {
         "available": True,
-        "cpu_temp_c": cpu_temp,
-        "gpu_temp_c": gpu_temp,
-        "fan_rpm": fan_rpm,
+        "pressure_level": pressure,         # Nominal / Fair / Serious / Critical
+        "gpu_power_mw": gpu_power_mw,
+        "gpu_freq_mhz": gpu_freq_mhz,
+        "cpu_power_mw": cpu_power_mw,
+        # Apple Silicon doesn't expose these via powermetrics:
+        "cpu_temp_c": None,
+        "gpu_temp_c": None,
+        "fan_rpm": None,
+        "hint": "Apple Silicon doesn't expose CPU/GPU die temperatures or fan RPM through powermetrics. Pressure level + GPU/CPU power are the available proxies for thermal load.",
     }
 
 
@@ -125,7 +153,7 @@ def read_system_stats() -> dict[str, Any]:
             pass
 
     gpu_util = _read_gpu_util()
-    thermal = _read_cpu_temp_via_powermetrics()
+    thermal = _read_thermal_via_powermetrics()
 
     result = {
         "ts": time.time(),
