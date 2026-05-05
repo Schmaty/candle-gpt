@@ -127,7 +127,7 @@ class V2InferenceModel:
                 df_kline[col] = 0.0
             df_kline = df_kline[list(FEATURE_COLUMNS_WITH_JOIN)]
             feats_df = compute_features(df_kline)
-            feats = torch.from_numpy(feats_df.to_numpy(dtype=np.float32)).unsqueeze(0)
+            feats = torch.from_numpy(feats_df.to_numpy(dtype=np.float32).copy()).unsqueeze(0)
             feats = feats.to(self.device)
             logits = self.model(feats)
             probs = F.softmax(logits[0, -1, :], dim=-1).cpu().numpy()
@@ -196,7 +196,7 @@ class V2InferenceModel:
                         }])[list(FEATURE_COLUMNS_WITH_JOIN)]
                         running_df = pd.concat([running_df, synth_row], ignore_index=True).iloc[-block_size:]
                         running_feats_df = compute_features(running_df)
-                        running_feats = torch.from_numpy(running_feats_df.to_numpy(dtype=np.float32)).unsqueeze(0).to(self.device)
+                        running_feats = torch.from_numpy(running_feats_df.to_numpy(dtype=np.float32).copy()).unsqueeze(0).to(self.device)
                         running_logits = self.model(running_feats)
                         step_probs = F.softmax(running_logits[0, -1, :], dim=-1).cpu().numpy()
                         step_expected_ret = float((step_probs * bin_centers_arr).sum())

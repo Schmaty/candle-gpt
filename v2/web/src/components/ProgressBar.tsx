@@ -1,11 +1,12 @@
 interface ProgressBarProps {
-  frac: number   // 0..1
+  frac: number | null | undefined   // 0..1
   label?: string
   color?: string
 }
 
 export function ProgressBar({ frac, label, color = 'var(--accent)' }: ProgressBarProps) {
-  const pct = Math.min(100, Math.max(0, frac * 100))
+  const safeFrac = (typeof frac === 'number' && Number.isFinite(frac)) ? frac : 0
+  const pct = Math.min(100, Math.max(0, safeFrac * 100))
   return (
     <div>
       <div style={{ height: 8, background: 'var(--bg-elevated)', borderRadius: 4, overflow: 'hidden' }}>

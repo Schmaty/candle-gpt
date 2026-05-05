@@ -43,6 +43,21 @@ def _checkpoints_in(ckpt_dir: Path) -> list[tuple[int, Path]]:
     return sorted(out)
 
 
+def _file_settled(path: Path, settle_seconds: float = 2.0) -> bool:
+    """Return True if the file's size hasn't changed for `settle_seconds`.
+    Cheap defense against loading a checkpoint that's still being written."""
+    try:
+        s1 = path.stat().st_size
+    except OSError:
+        return False
+    time.sleep(settle_seconds)
+    try:
+        s2 = path.stat().st_size
+    except OSError:
+        return False
+    return s1 == s2 and s1 > 0
+
+
 def _read_seen_steps(history_path: Path) -> set[int]:
     seen: set[int] = set()
     if not history_path.exists():
@@ -137,6 +152,9 @@ def main() -> int:
             log.info(f"found {len(new)} new checkpoint(s)")
         for step, path in new:
             try:
+                if not _file_settled(path):
+                    log.info(f"step {step} checkpoint not yet settled — will retry next pass")
+                    continue
                 # Fresh SweepService per checkpoint so it loads the new weights.
                 svc = SweepService(
                     run_dir=run_dir,

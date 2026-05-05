@@ -7,7 +7,7 @@ import { CalibrationPage } from './pages/CalibrationPage'
 import { RegimePage } from './pages/RegimePage'
 import { EquityPage } from './pages/EquityPage'
 import { BacktestPage, type BacktestSeed } from './pages/BacktestPage'
-import { fetchStatus } from './api'
+import { fetchStatus, reloadModel } from './api'
 
 const TABS = [
   { id: 'training',    label: 'Training' },
@@ -40,10 +40,26 @@ export default function App() {
         {status && (
           <span style={{ color: 'var(--fg-dim)', fontSize: 12 }}>
             {status.model_loaded
-              ? `model loaded · step ${status.ckpt_step?.toLocaleString()} · ${status.n_params?.toLocaleString()} params · ${status.device}`
+              ? `model loaded · run ${status.run_id ?? '—'} · step ${status.ckpt_step?.toLocaleString()} · ${status.n_params?.toLocaleString()} params · ${status.device}`
               : 'no model loaded'}
           </span>
         )}
+        <button
+          onClick={async () => {
+            try {
+              const res = await reloadModel()
+              const next = await fetchStatus()
+              setStatus(next)
+              alert(`Reloaded: run ${res.run_id} step ${res.ckpt_step?.toLocaleString?.() ?? res.ckpt_step}`)
+            } catch (e: any) {
+              alert(`Reload failed: ${e.message}`)
+            }
+          }}
+          style={{ marginLeft: 'auto', height: 28, fontSize: 12 }}
+          title="Re-scan v2/runs and bind to the most-recent best_val checkpoint"
+        >
+          ↻ Reload model
+        </button>
       </header>
       <TabBar tabs={TABS} active={activeTab} onSelect={setActiveTab} />
       <main style={{ flex: 1, overflow: 'auto', padding: '16px' }}>

@@ -48,6 +48,11 @@ export async function runSweep(temperatures: number[], horizons: number[], nSamp
   if (!r.ok) throw new Error(`sweep: ${r.status} ${await r.text()}`)
   return r.json()
 }
+export async function reloadModel() {
+  const r = await fetch(`${BASE}/admin/reload`, { method: 'POST' })
+  if (!r.ok) throw new Error(`reload: ${r.status} ${await r.text()}`)
+  return r.json()
+}
 export async function getSystemStats() {
   const r = await fetch(`${BASE}/system/stats`)
   if (!r.ok) throw new Error(`system/stats: ${r.status}`)

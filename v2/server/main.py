@@ -139,6 +139,34 @@ def system_stats():
     return read_system_stats()
 
 
+@app.post("/api/v2/admin/reload")
+def admin_reload():
+    """Re-scan v2/runs/ and rebind the inference model, EvalCache, and
+    SweepService to the current best checkpoint. Useful after a new
+    training run produces a fresh best_val.pt — previously this required
+    a server restart."""
+    global _BEST_RUN_DIR, sweep_service
+    ckpt_path, tok_path = _find_best_run()
+    if not ckpt_path:
+        raise HTTPException(404, "no checkpoint found in v2/runs/*/checkpoints/best_val.pt")
+    inference.load(ckpt_path, tok_path)
+    run_dir = ckpt_path.parents[1]
+    cache.load_from_report(run_dir / "REPORT.md", run_dir / "metrics.json")
+    _BEST_RUN_DIR = run_dir
+    sweep_service = SweepService(
+        run_dir=run_dir,
+        kline_path=RAW_DIR / "btcusdt_1m.parquet",
+        funding_path=RAW_DIR / "funding_btcusdt.parquet",
+        liq_path=RAW_DIR / "liq_btcusdt_per_minute.parquet",
+    )
+    return {
+        "reloaded": True,
+        "run_id": run_dir.name,
+        "ckpt_step": inference.ckpt_step,
+        "device": inference.device,
+    }
+
+
 @app.get("/api/v2/eval_history")
 def eval_history(run_id: Optional[str] = None):
     """Read v2/runs/<run_id>/eval_history.jsonl. If run_id is omitted,
