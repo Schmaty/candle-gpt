@@ -50,20 +50,12 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Group A: Candle structure ---
     log_return = np.log(c / prev_close).replace([np.inf, -np.inf], 0.0).fillna(0.0)
     log_return_open = np.log(o / prev_close).replace([np.inf, -np.inf], 0.0).fillna(0.0)
-
-    # --- Group K (multi-lag returns; depend on log_return) ---
-    # log_return_k = log(c_t / c_{t-k}) — explicit short-horizon momentum
-    # signal at the input layer, instead of forcing the model to derive it
-    # via attention. Lags 3 and 10 complement the lag-1 already in `log_return`.
-    log_return_3 = np.log(c / c.shift(3)).replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    log_return_10 = np.log(c / c.shift(10)).replace([np.inf, -np.inf], 0.0).fillna(0.0)
     high_low_range = (h - l) / c
     close_open_range = (c - o) / o
     candle_body_ratio = ((c - o).abs() / (h - l + 1e-8)).clip(upper=1.0)
 
     # --- Group B: Volatility ---
     realized_vol_5 = log_return.rolling(5, min_periods=1).std().fillna(0.0)
-    realized_vol_12 = log_return.rolling(12, min_periods=1).std().fillna(0.0)
     realized_vol_20 = log_return.rolling(20, min_periods=1).std().fillna(0.0)
     realized_vol_60 = log_return.rolling(60, min_periods=1).std().fillna(0.0)
     atr14 = _atr(h, l, c, period=14)
@@ -71,9 +63,6 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Group C: Volume ---
     log_volume = np.log1p(v)
-    # signed_log_volume: log_volume * sign(log_return_1) — captures whether
-    # moves are happening on real volume or thin tape.
-    signed_log_volume = log_volume * np.sign(log_return)
     vol_mean5 = v.rolling(5, min_periods=1).mean()
     vol_std5 = v.rolling(5, min_periods=1).std().fillna(1.0)
     volume_z_5 = ((v - vol_mean5) / (vol_std5 + 1e-8)).fillna(0.0)
@@ -188,10 +177,6 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
             "log_short_liq_notional": log_short_liq_notional,
             "log_close": log_close,
             "time_index_norm": time_index_norm,
-            "log_return_3": log_return_3,
-            "log_return_10": log_return_10,
-            "signed_log_volume": signed_log_volume,
-            "realized_vol_12": realized_vol_12,
         },
         index=df.index,
     )

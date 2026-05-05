@@ -57,15 +57,7 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     # Group J — Absolute level / time (2)
     "log_close",
     "time_index_norm",
-    # Group K — Multi-lag returns / signed volume / extra RV (4) [v2.1]
-    # Appended at the tail so older 41-feature checkpoints can still be
-    # served by slicing the first 41 columns of compute_features output.
-    "log_return_3",
-    "log_return_10",
-    "signed_log_volume",
-    "realized_vol_12",
 )
 
 N_FEATURES: int = len(FEATURE_COLUMNS)
-N_FEATURES_LEGACY_V20: int = 41  # frozen position of the v2.0.0 prefix
-assert N_FEATURES == 45, f"Expected 45 features, got {N_FEATURES}"
+assert N_FEATURES == 41, f"Expected 41 features, got {N_FEATURES}"
