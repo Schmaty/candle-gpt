@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { createChart, type IChartApi, CandlestickSeries, LineSeries } from 'lightweight-charts'
+import { createChart, type IChartApi, CandlestickSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'
 import { fetchCandles } from '../api'
 
 interface Candle {
@@ -50,6 +50,7 @@ export function LivePage() {
   const chart = useRef<IChartApi | null>(null)
   const candleSeries = useRef<any>(null)
   const predictionLine = useRef<any>(null)
+  const predictionMarkers = useRef<any>(null)
   const [prediction, setPrediction] = useState<Prediction | null>(null)
   const [lastPrice, setLastPrice] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
@@ -73,12 +74,16 @@ export function LivePage() {
       wickUpColor: '#00d4aa', wickDownColor: '#f05252',
     })
     // Dashed prediction line — gets data set whenever a new prediction arrives.
+    // pointMarkersVisible draws a dot at every (time, price) sample so each
+    // future bar's predicted close is called out, not just connected by a line.
     const pl = c.addSeries(LineSeries, {
       color: '#f5a623',
       lineWidth: 2,
       lineStyle: 2,        // dashed
       crosshairMarkerVisible: true,
       crosshairMarkerRadius: 6,
+      pointMarkersVisible: true,
+      pointMarkersRadius: 4,
       lastValueVisible: false,
       priceLineVisible: false,
       title: 'predicted',
@@ -86,6 +91,7 @@ export function LivePage() {
     chart.current = c
     candleSeries.current = cs
     predictionLine.current = pl
+    predictionMarkers.current = createSeriesMarkers(pl, [])
 
     const ro = new ResizeObserver(() => {
       if (chartRef.current) c.resize(chartRef.current.clientWidth, 380)
@@ -109,7 +115,10 @@ export function LivePage() {
         setLastPrice(candles[candles.length - 1].close)
 
         // Plot the model's predicted path: anchor at the last actual close,
-        // then the two future points (bar +1 and bar +2 in the chosen TF).
+        // then a point at each future bar (1..30 in the chosen TF). Dots
+        // appear at every sample via pointMarkersVisible; on top of that we
+        // overlay text labels at notable horizons so the user can read the
+        // dollar value off the chart.
         const path: PredictedPoint[] | undefined = data.prediction?.predicted_path
         if (path && path.length > 0) {
           const lastBar = candles[candles.length - 1]
@@ -118,8 +127,30 @@ export function LivePage() {
             ...path.map(pt => ({ time: pt.time as any, value: pt.close })),
           ]
           predictionLine.current?.setData(line)
+
+          // Text labels at hard-coded horizons that fit within the path length.
+          const labelHorizons = [1, 5, 10, 20, 30].filter(h => h <= path.length)
+          const markers = labelHorizons.map(h => {
+            const pt = path[h - 1]
+            const direction = pt.cumulative_z != null
+              ? (pt.cumulative_z > 0 ? 'up' : pt.cumulative_z < 0 ? 'down' : 'flat')
+              : 'flat'
+            const color = direction === 'up' ? '#00d4aa'
+              : direction === 'down' ? '#f05252'
+              : '#8492a6'
+            return {
+              time: pt.time as any,
+              position: (direction === 'down' ? 'aboveBar' : 'belowBar') as 'aboveBar' | 'belowBar',
+              color,
+              shape: 'circle' as const,
+              text: `H${h} $${pt.close.toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
+              size: 1,
+            }
+          })
+          predictionMarkers.current?.setMarkers(markers)
         } else {
           predictionLine.current?.setData([])
+          predictionMarkers.current?.setMarkers([])
         }
         chart.current?.timeScale().fitContent()
       }
