@@ -167,7 +167,20 @@ class V2InferenceModel:
                 df_kline[col] = 0.0
             df_kline = df_kline[list(FEATURE_COLUMNS_WITH_JOIN)]
             feats_df = compute_features(df_kline)
-            feats = torch.from_numpy(feats_df.to_numpy(dtype=np.float32).copy()).unsqueeze(0)
+            feats_np = feats_df.to_numpy(dtype=np.float32)
+            # Old checkpoints (41-feature v2.0.0) load fine but expect a
+            # narrower feature row than compute_features now emits. New
+            # features were APPENDED to FEATURE_COLUMNS, so slicing the first
+            # n_features columns preserves their original semantics. Refuse
+            # if the model wants more features than we know how to produce
+            # (i.e. it was trained with a future feature set we don't have).
+            want_n = self.model.cfg.n_features
+            if want_n > feats_np.shape[1]:
+                print(f"[inference] checkpoint expects n_features={want_n} "
+                      f"but pipeline produces {feats_np.shape[1]}; refusing.")
+                return None
+            feats_np = feats_np[:, :want_n]
+            feats = torch.from_numpy(feats_np.copy()).unsqueeze(0)
             feats = feats.to(self.device)
             logits = self.model(feats)
             probs = F.softmax(logits[0, -1, :], dim=-1).cpu().numpy()
@@ -237,7 +250,8 @@ class V2InferenceModel:
                         }])[list(FEATURE_COLUMNS_WITH_JOIN)]
                         running_df = pd.concat([running_df, synth_row], ignore_index=True).iloc[-block_size:]
                         running_feats_df = compute_features(running_df)
-                        running_feats = torch.from_numpy(running_feats_df.to_numpy(dtype=np.float32).copy()).unsqueeze(0).to(self.device)
+                        running_feats_np = running_feats_df.to_numpy(dtype=np.float32)[:, :want_n]
+                        running_feats = torch.from_numpy(running_feats_np.copy()).unsqueeze(0).to(self.device)
                         running_logits = self.model(running_feats)
                         step_probs = F.softmax(running_logits[0, -1, :], dim=-1).cpu().numpy()
                         step_expected_ret = float((step_probs * bin_centers_arr).sum())
