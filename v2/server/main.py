@@ -116,6 +116,39 @@ def candles(limit: int = 300, interval: str = "1m"):
     return result
 
 
+@app.get("/api/v2/predict")
+def predict(
+    anchor: Optional[int] = None,
+    anchor_time: Optional[int] = None,
+    interval: str = "1m",
+    horizon: int = 30,
+    limit: int = 300,
+):
+    """Run a forecast anchored at a specific past bar.
+    Pass either ``anchor`` (0-based index into the latest ``limit`` bars at
+    ``interval``) or ``anchor_time`` (unix seconds, the anchor bar's open
+    time). Returns a prediction payload shaped like the one in /candles."""
+    if interval not in _ALLOWED_INTERVALS:
+        raise HTTPException(400, f"interval must be one of {sorted(_ALLOWED_INTERVALS)}")
+    if anchor is None and anchor_time is None:
+        raise HTTPException(400, "must specify anchor (index) or anchor_time (unix seconds)")
+    if inference.model is None:
+        raise HTTPException(503, "no model loaded")
+    horizon = max(1, min(int(horizon), 100))
+    limit = max(50, min(int(limit), 520))
+    try:
+        return inference.predict_at_anchor(
+            anchor=anchor, anchor_time=anchor_time,
+            interval=interval, horizon=horizon, limit=limit,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"predict failed: {e}")
+
+
 @app.get("/api/v2/history")
 def history(limit: int = 1000):
     return {"windows": cache.history[:int(limit)]}

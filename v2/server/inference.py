@@ -100,9 +100,12 @@ class V2InferenceModel:
         if self.load(self._ckpt_path, self._tokenizer_path):
             print(f"[inference] auto-reloaded checkpoint: step {prev_step} -> {self.ckpt_step}")
 
-    def _fetch_recent_binance(self, limit: int = 520, interval: str = "1m") -> list[dict]:
+    def _fetch_recent_binance(
+        self, limit: int = 520, interval: str = "1m", end_ms: Optional[int] = None,
+    ) -> list[dict]:
         try:
-            end_ms = int(time.time() * 1000)
+            if end_ms is None:
+                end_ms = int(time.time() * 1000)
             params = {"symbol": "BTCUSDT", "interval": interval, "limit": limit, "endTime": end_ms}
             r = requests.get(BINANCE_KLINES_URL, params=params, timeout=15)
             r.raise_for_status()
@@ -123,30 +126,26 @@ class V2InferenceModel:
             return []
 
     @torch.no_grad()
-    def predict_live(self, limit: int = 300, interval: str = "1m") -> dict:
-        # Auto-reload if the training process wrote a newer best_val.pt.
-        self._maybe_reload()
-        # We need at least block_size bars of history to feed the model.
-        block_size = self.model.cfg.block_size if self.model is not None else 520
-        fetch_limit = max(limit, block_size + 10)
-        chart_raw = self._fetch_recent_binance(limit=fetch_limit, interval=interval)
-        chart_candles = chart_raw[-limit:] if chart_raw else []
+    def _run_inference_on_window(
+        self, window_candles: list[dict], horizon: int, interval: str,
+    ) -> Optional[dict]:
+        """Forward pass + autoregressive rollout starting from the last bar
+        in ``window_candles``. Returns the prediction payload (probs, top5,
+        predicted_path, etc.) or ``None`` on failure.
+
+        Caller is responsible for ensuring window_candles contains at least
+        ``self.model.cfg.block_size`` bars. The last bar in the list is the
+        anchor — the rollout starts immediately after it."""
         if self.model is None or self.tokenizer is None:
-            return {"candles": chart_candles, "prediction": None, "interval": interval}
-        if not chart_raw:
-            return {"candles": chart_candles, "prediction": None, "interval": interval}
-        # Run the model on whatever interval the user chose. The model was
-        # trained on 1m bars but the architecture is timeframe-agnostic; we
-        # rely on the assumption that local return patterns transfer to
-        # higher TFs. Quality may degrade — UI labels the prediction with
-        # the actual interval so the user knows what they're looking at.
-        window_candles = chart_raw[-block_size:]
+            return None
         if len(window_candles) < 10:
-            return {"candles": chart_candles, "prediction": None}
+            return None
         try:
             import pandas as pd
             from v2.data.dataset import FEATURE_COLUMNS_WITH_JOIN
             from v2.features.engineer import compute_features
+            block_size = self.model.cfg.block_size
+            interval_ms = INTERVAL_MS.get(interval, 60_000)
             n = len(window_candles)
             df_kline = pd.DataFrame({
                 "open_time":  [int(c["open_time_ms"]) for c in window_candles],
@@ -193,15 +192,14 @@ class V2InferenceModel:
             last_close = float(window_candles[-1]["close"])
             expected_close = last_close * float(np.exp(expected_ret))
 
-            # 30-step autoregressive rollout — one model forward pass per future
-            # bar. We use the rollout to:
-            #   (a) draw a 30-bar predicted path on the chart, and
-            #   (b) score the BUY/HOLD/SELL decision off the *cumulative* 30-bar
+            # Autoregressive rollout — one model forward pass per future bar.
+            # We use the rollout to:
+            #   (a) draw a multi-bar predicted path on the chart, and
+            #   (b) score the BUY/HOLD/SELL decision off the *cumulative*
             #       z-score rather than a single-step lean (since per-step
             #       expected returns are tiny on this model).
-            interval_ms = INTERVAL_MS.get(interval, 60_000)
             last_open_ms = int(window_candles[-1]["open_time_ms"])
-            HORIZON_BARS = 30
+            HORIZON_BARS = int(horizon)
             predicted_path = []
             cumulative_log_ret = 0.0
             cumulative_variance = 0.0
@@ -268,31 +266,119 @@ class V2InferenceModel:
             cumulative_z = cumulative_log_ret / cumulative_std
             cumulative_close = last_close * float(np.exp(cumulative_log_ret))
             return {
-                "candles": chart_candles,
-                "interval": interval,
-                "prediction": {
-                    "probs": probs.tolist(),
-                    "top5_rets": top5_rets,
-                    "top5_probs": top5_probs,
-                    "bin_centers": bin_centers,
-                    "p_up": p_up,
-                    "p_down": p_down,
-                    "p_flat": p_flat,
-                    "flat_eps": FLAT_EPS,
-                    "expected_ret": expected_ret,
-                    "expected_close": expected_close,
-                    "last_close": last_close,
-                    "entropy_bits": entropy_bits,
-                    "max_entropy_bits": max_entropy_bits,
-                    "confidence": confidence,
-                    "predicted_path": predicted_path,
-                    "horizon_bars": HORIZON_BARS,
-                    "horizon_cumulative_ret": cumulative_log_ret,
-                    "horizon_cumulative_close": cumulative_close,
-                    "horizon_cumulative_std": cumulative_std,
-                    "horizon_cumulative_z": cumulative_z,
-                },
+                "probs": probs.tolist(),
+                "top5_rets": top5_rets,
+                "top5_probs": top5_probs,
+                "bin_centers": bin_centers,
+                "p_up": p_up,
+                "p_down": p_down,
+                "p_flat": p_flat,
+                "flat_eps": FLAT_EPS,
+                "expected_ret": expected_ret,
+                "expected_close": expected_close,
+                "last_close": last_close,
+                "entropy_bits": entropy_bits,
+                "max_entropy_bits": max_entropy_bits,
+                "confidence": confidence,
+                "predicted_path": predicted_path,
+                "horizon_bars": HORIZON_BARS,
+                "horizon_cumulative_ret": cumulative_log_ret,
+                "horizon_cumulative_close": cumulative_close,
+                "horizon_cumulative_std": cumulative_std,
+                "horizon_cumulative_z": cumulative_z,
+                "anchor_time": int(window_candles[-1]["time"]),
             }
         except Exception as e:
-            print(f"[inference] predict_live failed: {e}")
+            print(f"[inference] _run_inference_on_window failed: {e}")
+            return None
+
+    @torch.no_grad()
+    def predict_live(self, limit: int = 300, interval: str = "1m") -> dict:
+        # Auto-reload if the training process wrote a newer best_val.pt.
+        self._maybe_reload()
+        block_size = self.model.cfg.block_size if self.model is not None else 520
+        fetch_limit = max(limit, block_size + 10)
+        chart_raw = self._fetch_recent_binance(limit=fetch_limit, interval=interval)
+        chart_candles = chart_raw[-limit:] if chart_raw else []
+        if self.model is None or self.tokenizer is None or not chart_raw:
             return {"candles": chart_candles, "prediction": None, "interval": interval}
+        # Run the model on whatever interval the user chose. The model was
+        # trained on 1m bars but the architecture is timeframe-agnostic; we
+        # rely on the assumption that local return patterns transfer to
+        # higher TFs. Quality may degrade — UI labels the prediction with
+        # the actual interval so the user knows what they're looking at.
+        window_candles = chart_raw[-block_size:]
+        prediction = self._run_inference_on_window(window_candles, horizon=30, interval=interval)
+        return {"candles": chart_candles, "interval": interval, "prediction": prediction}
+
+    @torch.no_grad()
+    def predict_at_anchor(
+        self,
+        *,
+        anchor: Optional[int] = None,
+        anchor_time: Optional[int] = None,
+        interval: str = "1m",
+        horizon: int = 30,
+        limit: int = 300,
+    ) -> dict:
+        """Run a forecast anchored at a specific past bar.
+
+        ``anchor_time`` (unix seconds, the bar's open time) takes precedence
+        over ``anchor`` (0-based index into the latest ``limit`` candles).
+        Raises ``ValueError`` for bad inputs / not-enough-context, and
+        ``RuntimeError`` for upstream / model failures."""
+        self._maybe_reload()
+        if self.model is None or self.tokenizer is None:
+            raise RuntimeError("model not loaded")
+        block_size = self.model.cfg.block_size
+        interval_ms = INTERVAL_MS.get(interval, 60_000)
+
+        # Resolve anchor index → anchor_time when caller passed an index.
+        # The index path interprets ``anchor`` as a position in the latest
+        # ``limit`` bars (the same window /candles returns), and requires
+        # enough lookback within that window to feed the model — anchors
+        # in the first ``block_size - 1`` slots are flagged too-early so
+        # the UI can grey them out.
+        if anchor_time is None:
+            if anchor is None:
+                raise ValueError("must specify anchor or anchor_time")
+            chart_raw = self._fetch_recent_binance(limit=int(limit), interval=interval)
+            if not chart_raw:
+                raise RuntimeError("failed to fetch candles from upstream")
+            if anchor < 0 or anchor >= len(chart_raw):
+                raise ValueError(f"anchor {anchor} out of range [0, {len(chart_raw)})")
+            if anchor < block_size - 1:
+                raise ValueError(
+                    f"anchor {anchor} too early — need at least {block_size - 1} "
+                    f"prior bars in the same window for context, only have {anchor}"
+                )
+            anchor_time = int(chart_raw[anchor]["time"])
+
+        # Fetch block_size+10 bars ending at the anchor (inclusive). Binance
+        # endTime is exclusive of the next bar's open, so add interval_ms - 1
+        # to make the anchor's close fall inside the requested window.
+        end_ms = int(anchor_time) * 1000 + interval_ms - 1
+        fetch_limit = block_size + 10
+        window_raw = self._fetch_recent_binance(
+            limit=fetch_limit, interval=interval, end_ms=end_ms,
+        )
+        if not window_raw:
+            raise RuntimeError("failed to fetch anchor window from upstream")
+        if int(window_raw[-1]["time"]) != int(anchor_time):
+            raise ValueError(
+                f"anchor_time {anchor_time} did not align to a bar (got last bar at "
+                f"{window_raw[-1]['time']}); is the timestamp on a {interval} boundary?"
+            )
+        if len(window_raw) < block_size:
+            raise ValueError(
+                f"not enough history before anchor: have {len(window_raw)} bars, "
+                f"need {block_size}. Pick a later anchor."
+            )
+
+        window_candles = window_raw[-block_size:]
+        prediction = self._run_inference_on_window(
+            window_candles, horizon=int(horizon), interval=interval,
+        )
+        if prediction is None:
+            raise RuntimeError("inference failed; see server logs")
+        return {"interval": interval, "anchor_time": int(anchor_time), "prediction": prediction}
