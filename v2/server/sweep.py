@@ -36,6 +36,8 @@ class _Cache:
     full_ds: KlineWindowDataset
     val_end_bar: int
     device: torch.device
+    ckpt_mtime: float
+    ckpt_step: Optional[int]
 
 
 class SweepService:
@@ -51,13 +53,27 @@ class SweepService:
         self._cache: Optional[_Cache] = None
         self._lock = threading.Lock()
 
+    def _ckpt_path(self) -> Path:
+        return self.run_dir / "checkpoints" / self.ckpt_filename
+
     def _ensure_loaded(self) -> _Cache:
+        # Fast path: cache is up-to-date with on-disk best_val.pt.
         if self._cache is not None:
-            return self._cache
-        with self._lock:
-            if self._cache is not None:
+            try:
+                if self._ckpt_path().stat().st_mtime == self._cache.ckpt_mtime:
+                    return self._cache
+            except OSError:
                 return self._cache
-            ckpt_path = self.run_dir / "checkpoints" / self.ckpt_filename
+        with self._lock:
+            ckpt_path = self._ckpt_path()
+            try:
+                mtime = ckpt_path.stat().st_mtime
+            except OSError as e:
+                if self._cache is not None:
+                    return self._cache
+                raise RuntimeError(f"sweep: cannot stat checkpoint {ckpt_path}: {e}")
+            if self._cache is not None and mtime == self._cache.ckpt_mtime:
+                return self._cache
             tokenizer_path = self.run_dir / "tokenizer.pkl"
             if torch.cuda.is_available():
                 device = torch.device("cuda")
@@ -73,23 +89,35 @@ class SweepService:
             tok = ReturnTokenizerV2.load(tokenizer_path)
             bin_centers = tok.decode(np.arange(tok.n_bins)).astype(np.float64)
 
-            cfg = TrainConfig()  # only used to know window/strides — defaults match training
-            full_ds = KlineWindowDataset(
-                path=self.kline_path,
-                window=cfg.window,
-                stride=1,
-                funding_path=self.funding_path,
-                liq_path=self.liq_path,
-                apply_features=True,
-                return_targets=True,
+            # Only build the dataset on first load; reuse it across reloads
+            # since kline/funding/liq files don't change during a training run.
+            if self._cache is not None:
+                full_ds = self._cache.full_ds
+                test_ds = self._cache.test_ds
+                val_end_bar = self._cache.val_end_bar
+            else:
+                cfg = TrainConfig()  # only used to know window/strides — defaults match training
+                full_ds = KlineWindowDataset(
+                    path=self.kline_path,
+                    window=cfg.window,
+                    stride=1,
+                    funding_path=self.funding_path,
+                    liq_path=self.liq_path,
+                    apply_features=True,
+                    return_targets=True,
+                )
+                n_bars = full_ds._bars.shape[0]
+                val_end_bar = int(n_bars * (cfg.train_frac + cfg.val_frac))
+                val_end_win = max(0, val_end_bar - cfg.window + 1)
+                test_indices = list(range(val_end_win, len(full_ds), cfg.stride_val))
+                test_ds = Subset(full_ds, test_indices)
+            ckpt_step = ckpt.get("step")
+            prev_step = self._cache.ckpt_step if self._cache is not None else None
+            log.info(
+                f"[sweep] {'reloaded' if self._cache is not None else 'loaded'} "
+                f"model on {device} (step {prev_step} -> {ckpt_step}, "
+                f"{len(test_ds)} test windows)"
             )
-            n_bars = full_ds._bars.shape[0]
-            train_end_bar = int(n_bars * cfg.train_frac)
-            val_end_bar = int(n_bars * (cfg.train_frac + cfg.val_frac))
-            val_end_win = max(0, val_end_bar - cfg.window + 1)
-            test_indices = list(range(val_end_win, len(full_ds), cfg.stride_val))
-            test_ds = Subset(full_ds, test_indices)
-            log.info(f"[sweep] loaded model + {len(test_ds)} test windows on {device}")
 
             self._cache = _Cache(
                 model=model,
@@ -99,6 +127,8 @@ class SweepService:
                 full_ds=full_ds,
                 val_end_bar=val_end_bar,
                 device=device,
+                ckpt_mtime=mtime,
+                ckpt_step=ckpt_step,
             )
             return self._cache
 

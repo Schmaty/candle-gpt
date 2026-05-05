@@ -1,5 +1,6 @@
 """V2InferenceModel: wraps CandleGPTv2 for live single-step prediction."""
 from __future__ import annotations
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +33,11 @@ class V2InferenceModel:
         self.run_id: Optional[str] = None
         self.ckpt_step: Optional[int] = None
         self._last_mtime: float = 0.0
+        # Remember last-loaded paths so predict_live can auto-reload when the
+        # training process writes a fresh best_val.pt under the same path.
+        self._ckpt_path: Optional[Path] = None
+        self._tokenizer_path: Optional[Path] = None
+        self._load_lock = threading.Lock()
 
     def _select_device(self) -> str:
         if torch.backends.mps.is_available():
@@ -41,26 +47,58 @@ class V2InferenceModel:
         return "cpu"
 
     def load(self, ckpt_path: Path, tokenizer_path: Path) -> bool:
-        try:
-            mtime = ckpt_path.stat().st_mtime
-            if self.model is not None and mtime == self._last_mtime:
+        with self._load_lock:
+            try:
+                mtime = ckpt_path.stat().st_mtime
+                if self.model is not None and mtime == self._last_mtime:
+                    return True
+                ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+                cfg = ModelConfig.from_dict(ckpt["model_config"])
+                device = self._select_device()
+                model = CandleGPTv2(cfg).to(device)
+                model.load_state_dict(ckpt["model_state"])
+                model.eval()
+                self.model = model
+                self.tokenizer = ReturnTokenizerV2.load(tokenizer_path)
+                self.device = device
+                self.run_id = ckpt.get("run_id")
+                self.ckpt_step = ckpt.get("step")
+                self._last_mtime = mtime
+                self._ckpt_path = Path(ckpt_path)
+                self._tokenizer_path = Path(tokenizer_path)
                 return True
-            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-            cfg = ModelConfig.from_dict(ckpt["model_config"])
-            device = self._select_device()
-            model = CandleGPTv2(cfg).to(device)
-            model.load_state_dict(ckpt["model_state"])
-            model.eval()
-            self.model = model
-            self.tokenizer = ReturnTokenizerV2.load(tokenizer_path)
-            self.device = device
-            self.run_id = ckpt.get("run_id")
-            self.ckpt_step = ckpt.get("step")
-            self._last_mtime = mtime
-            return True
-        except Exception as e:
-            print(f"[inference] load failed: {e}")
-            return False
+            except Exception as e:
+                print(f"[inference] load failed: {e}")
+                return False
+
+    def _maybe_reload(self) -> None:
+        """If the on-disk best_val.pt has been replaced since we last loaded
+        it, hot-reload the weights so live predictions track the training
+        run. Cheap when nothing changed (one stat() call)."""
+        if self._ckpt_path is None or self._tokenizer_path is None:
+            return
+        try:
+            mtime = self._ckpt_path.stat().st_mtime
+        except OSError:
+            return
+        if mtime == self._last_mtime:
+            return
+        # File changed — but it may still be in the middle of being written.
+        # Wait briefly and require a stable size before swapping in.
+        try:
+            s1 = self._ckpt_path.stat().st_size
+        except OSError:
+            return
+        time.sleep(0.5)
+        try:
+            s2 = self._ckpt_path.stat().st_size
+        except OSError:
+            return
+        if s1 != s2 or s1 == 0:
+            return
+        prev_step = self.ckpt_step
+        if self.load(self._ckpt_path, self._tokenizer_path):
+            print(f"[inference] auto-reloaded checkpoint: step {prev_step} -> {self.ckpt_step}")
 
     def _fetch_recent_binance(self, limit: int = 520, interval: str = "1m") -> list[dict]:
         try:
@@ -86,6 +124,8 @@ class V2InferenceModel:
 
     @torch.no_grad()
     def predict_live(self, limit: int = 300, interval: str = "1m") -> dict:
+        # Auto-reload if the training process wrote a newer best_val.pt.
+        self._maybe_reload()
         # We need at least block_size bars of history to feed the model.
         block_size = self.model.cfg.block_size if self.model is not None else 520
         fetch_limit = max(limit, block_size + 10)
