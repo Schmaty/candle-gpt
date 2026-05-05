@@ -204,13 +204,20 @@ class V2InferenceModel:
 
                     cumulative_log_ret += step_expected_ret
                     cumulative_variance += step_variance
+                    cum_std_i = float(np.sqrt(max(cumulative_variance, 1e-24)))
+                    cum_z_i = cumulative_log_ret / cum_std_i
                     new_close = running_close * float(np.exp(step_expected_ret))
+                    cum_close_i = last_close * float(np.exp(cumulative_log_ret))
                     new_open_ms = last_open_ms + (i + 1) * interval_ms
                     predicted_path.append({
                         "time": new_open_ms // 1000,
                         "close": new_close,
                         "ret_bps": step_expected_ret * 1e4,
                         "cumulative_ret_bps": cumulative_log_ret * 1e4,
+                        "cumulative_std_bps": cum_std_i * 1e4,
+                        "cumulative_z": cum_z_i,
+                        "cumulative_close": cum_close_i,
+                        "horizon": i + 1,
                     })
                     running_close = new_close
             except Exception as e:

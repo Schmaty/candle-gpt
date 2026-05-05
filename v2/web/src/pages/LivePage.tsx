@@ -16,6 +16,10 @@ interface PredictedPoint {
   close: number
   ret_bps: number
   cumulative_ret_bps: number
+  cumulative_std_bps?: number
+  cumulative_z?: number
+  cumulative_close?: number
+  horizon?: number
 }
 
 interface Prediction {
@@ -352,10 +356,15 @@ function TradeWheel({
   fmtPrice: (price: number) => string
 }) {
   const conf = p.confidence
-  const horizonBars = p.horizon_bars ?? 30
+  const maxHorizon = p.horizon_bars ?? p.predicted_path?.length ?? 30
+  const [selectedHorizon, setSelectedHorizon] = useState<number>(maxHorizon)
 
-  // Per-bar z-score (variance of next-bar distribution). Kept for reference;
-  // the verb + needle now use the *cumulative* horizon z-score.
+  // Keep the slider in range when the server changes its horizon length.
+  useEffect(() => {
+    if (selectedHorizon > maxHorizon) setSelectedHorizon(maxHorizon)
+  }, [maxHorizon])
+
+  // Per-bar variance — only used as a fallback for very short paths.
   let variance = 0
   for (let i = 0; i < p.probs.length; i++) {
     const d = p.bin_centers[i] - p.expected_ret
@@ -363,11 +372,16 @@ function TradeWheel({
   }
   const perBarStd = Math.sqrt(Math.max(variance, 1e-12))
 
-  // Cumulative horizon stats from the server's 30-step rollout.
-  const cumRet = p.horizon_cumulative_ret ?? p.expected_ret
-  const cumStd = p.horizon_cumulative_std ?? perBarStd
-  const cumClose = p.horizon_cumulative_close ?? p.expected_close
-  const zScore = p.horizon_cumulative_z ?? (cumRet / Math.max(cumStd, 1e-12))
+  // Pick the requested horizon's stats out of the predicted path.
+  // Path entries are 1-indexed (entry[0] = horizon 1).
+  const path = p.predicted_path ?? []
+  const idx = Math.max(0, Math.min(path.length - 1, selectedHorizon - 1))
+  const entry = path[idx]
+  const cumRet = (entry?.cumulative_ret_bps ?? (p.horizon_cumulative_ret ?? p.expected_ret) * 1e4) / 1e4
+  const cumStd = (entry?.cumulative_std_bps ?? (p.horizon_cumulative_std ?? perBarStd) * 1e4) / 1e4
+  const cumClose = entry?.cumulative_close ?? p.horizon_cumulative_close ?? p.expected_close
+  const zScore = entry?.cumulative_z ?? p.horizon_cumulative_z ?? (cumRet / Math.max(cumStd, 1e-12))
+  const horizonBars = selectedHorizon
 
   // Verb is driven by the cumulative-horizon z-score so the recommendation
   // reflects the model's lean over the full 30-bar forecast, not a single
@@ -442,8 +456,35 @@ function TradeWheel({
 
   return (
     <div className="card" style={{ padding: '20px 24px' }}>
-      <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>
-        Trade analysis — next {horizonBars} × {interval} bars
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+        <span style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          Trade analysis — next {horizonBars} × {interval} bar{horizonBars === 1 ? '' : 's'}
+        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 11, color: 'var(--fg-dim)' }}>Horizon</span>
+          {[1, 3, 5, 10, 20, 30].filter(h => h <= maxHorizon).map(h => (
+            <button
+              key={h}
+              className={selectedHorizon === h ? 'active' : ''}
+              onClick={() => setSelectedHorizon(h)}
+              style={{ fontSize: 11, padding: '2px 8px', height: 24 }}
+            >
+              {h}
+            </button>
+          ))}
+          <input
+            type="range"
+            min={1}
+            max={maxHorizon}
+            value={selectedHorizon}
+            onChange={e => setSelectedHorizon(parseInt(e.target.value, 10))}
+            style={{ width: 100, marginLeft: 4 }}
+            title={`Horizon: ${selectedHorizon}`}
+          />
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg)', minWidth: 24, textAlign: 'right' }}>
+            {selectedHorizon}
+          </span>
+        </div>
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'center' }}>
@@ -561,6 +602,23 @@ function TradeWheel({
         </div>
       </div>
 
+      {/* Per-horizon lean curve */}
+      {path.length > 1 && (
+        <div style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid #1c2230' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <span style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Lean by horizon — z-score across all 1..{maxHorizon} bars
+            </span>
+            <span style={{ fontSize: 10, color: 'var(--fg-dim)' }}>click a bar to select that horizon</span>
+          </div>
+          <ZByHorizon
+            path={path}
+            selected={selectedHorizon}
+            onPick={setSelectedHorizon}
+          />
+        </div>
+      )}
+
       {/* Quick stats row */}
       <div style={{
         display: 'grid',
@@ -584,6 +642,64 @@ function Stat({ label, value, color }: { label: string, value: string, color?: s
     <div style={{ textAlign: 'center' }}>
       <div style={{ fontSize: 10, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
       <div style={{ fontSize: 14, fontFamily: 'var(--font-mono)', color: color ?? 'var(--fg)', marginTop: 2 }}>{value}</div>
+    </div>
+  )
+}
+
+function ZByHorizon({
+  path,
+  selected,
+  onPick,
+}: {
+  path: PredictedPoint[]
+  selected: number
+  onPick: (h: number) => void
+}) {
+  const zs = path.map(p => p.cumulative_z ?? 0)
+  const maxAbs = Math.max(0.05, ...zs.map(z => Math.abs(z)))
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', height: 80, gap: 2, background: '#0e1620', border: '1px solid #1c2230', borderRadius: 4, padding: '8px 6px', position: 'relative' }}>
+        {/* Zero line */}
+        <div style={{ position: 'absolute', left: 6, right: 6, top: '50%', height: 1, background: '#3a4458' }} />
+        {path.map((pt, i) => {
+          const h = pt.horizon ?? i + 1
+          const z = pt.cumulative_z ?? 0
+          const heightPct = (Math.abs(z) / maxAbs) * 50  // 0..50% of the half
+          const isSel = h === selected
+          const color = z > 0 ? '#00d4aa' : z < 0 ? '#f05252' : '#8492a6'
+          return (
+            <div
+              key={i}
+              onClick={() => onPick(h)}
+              title={`H=${h} · z=${z.toFixed(3)} · ret=${pt.cumulative_ret_bps.toFixed(2)} bps`}
+              style={{
+                flex: 1,
+                height: '100%',
+                position: 'relative',
+                cursor: 'pointer',
+                opacity: isSel ? 1 : 0.85,
+              }}
+            >
+              <div style={{
+                position: 'absolute',
+                left: 0, right: 0,
+                ...(z >= 0
+                  ? { top: `calc(50% - ${heightPct}%)`, height: `${heightPct}%` }
+                  : { top: '50%', height: `${heightPct}%` }),
+                background: color,
+                borderRadius: 2,
+                outline: isSel ? '2px solid #fff' : 'none',
+              }} />
+            </div>
+          )
+        })}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--fg-dim)', marginTop: 4 }}>
+        <span>H=1</span>
+        <span style={{ color: 'var(--fg)' }}>H={selected}: z={(path[selected - 1]?.cumulative_z ?? 0).toFixed(3)}</span>
+        <span>H={path.length}</span>
+      </div>
     </div>
   )
 }
