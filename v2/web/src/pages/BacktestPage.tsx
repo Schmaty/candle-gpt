@@ -19,10 +19,14 @@ interface BacktestResult {
   horizon: number
   z_threshold: number
   fee_bps: number
+  strategy: string
+  annualized_vol: number
+  atm_premium_pct: number
   n_windows: number
   trades: number
   longs: number
   shorts: number
+  straddles?: number
   flats: number
   win_rate: number
   total_return_pct: number
@@ -32,6 +36,13 @@ interface BacktestResult {
   equity: EquityPoint[]
   error?: string
 }
+
+const STRATEGIES: { id: string; label: string; description: string }[] = [
+  { id: 'spot',          label: 'Spot long/short', description: 'Long if z > threshold, short if z < −threshold. PnL = ±actual cumulative log return − fee.' },
+  { id: 'long_call',     label: 'Long ATM calls (bullish only)', description: 'Buy an ATM call when z > threshold. PnL = max(0, ΔS) − premium.' },
+  { id: 'long_put',      label: 'Long ATM puts (bearish only)',  description: 'Buy an ATM put when z < −threshold. PnL = max(0, −ΔS) − premium.' },
+  { id: 'long_straddle', label: 'Long ATM straddle (volatility)', description: 'Buy a call + put when |z| > threshold. PnL = |ΔS| − 2×premium. Profits on big moves either way.' },
+]
 
 const inputStyle: React.CSSProperties = {
   display: 'block', width: '100%', marginTop: 4,
@@ -52,6 +63,8 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
   const [feeBps, setFeeBps] = useState(0.0)
   const [startFrac, setStartFrac] = useState(0)
   const [endFrac, setEndFrac] = useState(1)
+  const [strategy, setStrategy] = useState('spot')
+  const [annualizedVol, setAnnualizedVol] = useState(0.6)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<BacktestResult | null>(null)
@@ -104,6 +117,7 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
       const res = await runBacktest({
         temperature, horizon, z_threshold: zThreshold,
         start_frac: startFrac, end_frac: endFrac, fee_bps: feeBps,
+        strategy, annualized_vol: annualizedVol,
       })
       if (res.error) {
         setError(res.error)
@@ -137,7 +151,25 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
           Use <code style={{ fontFamily: 'var(--font-mono)', color: '#00d4aa' }}>z_threshold = 0</code> to take a position on every window, then dial up to filter for higher-conviction signals.
           A threshold of 0.05+ will give you 0 trades on this model.
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr) auto', gap: 12, alignItems: 'end' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', gap: 12, alignItems: 'end', marginBottom: 12 }}>
+          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
+            Strategy
+            <select
+              value={strategy}
+              onChange={e => setStrategy(e.target.value)}
+              style={{ ...inputStyle, padding: '6px 10px' }}
+            >
+              {STRATEGIES.map(s => (
+                <option key={s.id} value={s.id}>{s.label}</option>
+              ))}
+            </select>
+          </label>
+          {strategy !== 'spot' && (
+            <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
+              Annualized vol (for premium)
+              <input type="number" step={0.05} min={0.01} value={annualizedVol} onChange={e => setAnnualizedVol(parseFloat(e.target.value) || 0.6)} style={inputStyle} />
+            </label>
+          )}
           <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
             Temperature
             <input type="number" step={0.1} min={0.1} value={temperature} onChange={e => setTemperature(parseFloat(e.target.value) || 1)} style={inputStyle} />
@@ -146,6 +178,8 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
             Horizon (bars)
             <input type="number" min={1} max={500} value={horizon} onChange={e => setHorizon(parseInt(e.target.value, 10) || 30)} style={inputStyle} />
           </label>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr) auto', gap: 12, alignItems: 'end' }}>
           <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
             z threshold
             <input type="number" step={0.01} min={0} value={zThreshold} onChange={e => setZThreshold(parseFloat(e.target.value) || 0)} style={inputStyle} />
@@ -166,6 +200,9 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
             {running ? 'Running…' : 'Run backtest'}
           </button>
         </div>
+        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--fg-dim)' }}>
+          {STRATEGIES.find(s => s.id === strategy)?.description}
+        </div>
         {error && <div style={{ color: 'var(--red)', fontSize: 12, marginTop: 10 }}>{error}</div>}
         {seed && (
           <div style={{ marginTop: 10, fontSize: 11, color: 'var(--fg-dim)' }}>
@@ -179,15 +216,39 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
         <div className="card">
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12 }}>
             <Stat label="Trades" value={result.trades.toString()} />
-            <Stat label="Longs / Shorts / Flats" value={`${result.longs} / ${result.shorts} / ${result.flats}`} />
+            <Stat
+              label={
+                result.strategy === 'long_straddle'
+                  ? 'Straddles / Flats'
+                  : result.strategy === 'long_call'
+                    ? 'Calls / Flats'
+                    : result.strategy === 'long_put'
+                      ? 'Puts / Flats'
+                      : 'Longs / Shorts / Flats'
+              }
+              value={
+                result.strategy === 'long_straddle'
+                  ? `${result.straddles ?? 0} / ${result.flats}`
+                  : result.strategy === 'long_call'
+                    ? `${result.longs} / ${result.flats}`
+                    : result.strategy === 'long_put'
+                      ? `${result.shorts} / ${result.flats}`
+                      : `${result.longs} / ${result.shorts} / ${result.flats}`
+              }
+            />
             <Stat label="Win rate" value={`${(result.win_rate * 100).toFixed(1)}%`} color={result.win_rate > 0.5 ? '#00d4aa' : '#f5a623'} />
             <Stat label="Total return" value={`${result.total_return_pct >= 0 ? '+' : ''}${result.total_return_pct.toFixed(2)}%`} color={result.total_return_pct >= 0 ? '#00d4aa' : '#f05252'} />
             <Stat label="Sharpe / trade" value={result.sharpe_per_trade.toFixed(3)} />
             <Stat label="Max drawdown" value={`${result.max_drawdown_pct.toFixed(2)}%`} color="#f05252" />
           </div>
-          <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 10 }}>
-            Run on {result.n_windows} test windows · T={result.temperature}, H={result.horizon}, z≥{result.z_threshold}, fee={result.fee_bps} bps
-            {elapsedMs !== null && ` · backtest took ${(elapsedMs / 1000).toFixed(2)}s`}
+          <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 10, lineHeight: 1.6 }}>
+            Strategy: <span style={{ color: 'var(--fg)', fontFamily: 'var(--font-mono)' }}>{result.strategy}</span>
+            {' · '}
+            Run on {result.n_windows} windows · T={result.temperature}, H={result.horizon}, z≥{result.z_threshold}, fee={result.fee_bps} bps
+            {result.strategy !== 'spot' && (
+              <> · σ={result.annualized_vol.toFixed(2)} → ATM premium <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--fg)' }}>{result.atm_premium_pct.toFixed(3)}%</span></>
+            )}
+            {elapsedMs !== null && ` · ${(elapsedMs / 1000).toFixed(2)}s`}
           </div>
         </div>
       )}

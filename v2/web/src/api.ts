@@ -67,6 +67,7 @@ export async function getEvalHistory(runId?: string) {
 export async function runBacktest(opts: {
   temperature: number; horizon: number; z_threshold: number;
   start_frac?: number; end_frac?: number; fee_bps?: number;
+  strategy?: string; annualized_vol?: number; bar_seconds?: number;
 }) {
   const params = new URLSearchParams({
     temperature: String(opts.temperature),
@@ -74,7 +75,10 @@ export async function runBacktest(opts: {
     z_threshold: String(opts.z_threshold),
     start_frac: String(opts.start_frac ?? 0),
     end_frac: String(opts.end_frac ?? 1),
-    fee_bps: String(opts.fee_bps ?? 1.0),
+    fee_bps: String(opts.fee_bps ?? 0.0),
+    strategy: String(opts.strategy ?? 'spot'),
+    annualized_vol: String(opts.annualized_vol ?? 0.6),
+    bar_seconds: String(opts.bar_seconds ?? 60),
   })
   const r = await fetch(`${BASE}/backtest?${params}`)
   if (!r.ok) throw new Error(`backtest: ${r.status} ${await r.text()}`)

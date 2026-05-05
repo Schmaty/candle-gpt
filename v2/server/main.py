@@ -250,15 +250,21 @@ def backtest(
     start_frac: float = 0.0,
     end_frac: float = 1.0,
     fee_bps: float = 0.0,
+    strategy: str = "spot",
+    annualized_vol: float = 0.6,
+    bar_seconds: int = 60,
 ):
-    """Run a long/short backtest over a slice of the test set with the
-    chosen settings. Returns equity curve + summary stats."""
+    """Run a backtest over a slice of the test set with the chosen settings.
+    `strategy` is one of: spot, long_call, long_put, long_straddle.
+    Returns equity curve + summary stats."""
     if sweep_service is None:
         raise HTTPException(503, "sweep service unavailable — no trained run")
     try:
         return sweep_service.backtest(
             temperature=temperature, horizon=horizon, z_threshold=z_threshold,
             start_frac=start_frac, end_frac=end_frac, fee_bps=fee_bps,
+            strategy=strategy, annualized_vol=annualized_vol,
+            bar_seconds=bar_seconds,
         )
     except Exception as e:
         raise HTTPException(500, f"backtest failed: {e}")

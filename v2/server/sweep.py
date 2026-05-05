@@ -231,10 +231,24 @@ class SweepService:
 
     def backtest(self, temperature: float, horizon: int, z_threshold: float,
                  start_frac: float = 0.0, end_frac: float = 1.0,
-                 fee_bps: float = 1.0) -> dict:
-        """Run a long/short backtest over a slice of the test set using the
-        chosen (temperature, horizon, z_threshold). Returns equity curve plus
-        summary stats."""
+                 fee_bps: float = 1.0, strategy: str = "spot",
+                 annualized_vol: float = 0.6,
+                 bar_seconds: int = 60) -> dict:
+        """Run a backtest over a slice of the test set using the chosen
+        (temperature, horizon, z_threshold). Returns equity curve plus
+        summary stats.
+
+        strategy:
+          'spot'          — long if z > threshold, short if z < -threshold.
+                            PnL = ±actual cumulative log return − fee.
+          'long_call'     — buy ATM call when z > +threshold (bullish only).
+          'long_put'      — buy ATM put when z < -threshold (bearish only).
+          'long_straddle' — buy ATM call + put when |z| > threshold.
+
+        Option premiums priced via the standard ATM approximation
+            P ≈ 0.4 · S · σ · √T
+        where σ is annualized vol and T = horizon * bar_seconds / 31_557_600.
+        """
         c = self._ensure_loaded()
         n_test = len(c.test_ds)
         i0 = int(max(0.0, min(1.0, start_frac)) * n_test)
@@ -265,41 +279,80 @@ class SweepService:
         cum_std = std * np.sqrt(horizon)
         z = cum_ret_pred / np.maximum(cum_std, 1e-12)
 
-        # Decision: long if z > +threshold, short if z < -threshold, else flat.
-        # Hold for `horizon` bars, then close. Realized return = actual cumulative
-        # log-return over those H bars, minus fee on entry+exit (2*fee_bps in bps).
+        # Time-to-expiry in years for option pricing.
+        SECONDS_PER_YEAR = 31_557_600.0
+        T_years = max(horizon * bar_seconds / SECONDS_PER_YEAR, 1e-9)
+        atm_premium_ratio = 0.4 * annualized_vol * float(np.sqrt(T_years))
+        # log-space premium: log(1 - p) ≈ -p for small p.
+        long_premium_log = float(np.log(max(1.0 - atm_premium_ratio, 1e-6)))
+        straddle_premium_log = float(np.log(max(1.0 - 2.0 * atm_premium_ratio, 1e-6)))
+
         fee = (2 * fee_bps) / 10000.0
         equity = []
         cum_log_pnl = 0.0
         wins = 0
         trades = 0
-        position_taken = []
+        position_taken: list[int] = []  # +1=bullish position, -1=bearish, 0=flat, 2=straddle
+        valid_strategies = {"spot", "long_call", "long_put", "long_straddle"}
+        if strategy not in valid_strategies:
+            return {"error": f"unknown strategy: {strategy}. valid: {sorted(valid_strategies)}"}
+
         for i, b_i in enumerate(start_bar):
             s = int(b_i)
             if s < 0 or s + horizon > len(log_ret):
                 continue
-            actual_cum = float(log_ret[s: s + horizon].sum())
-            if z[i] > z_threshold:
-                pnl = actual_cum - fee
-                position_taken.append(1)
+            actual_cum_log = float(log_ret[s: s + horizon].sum())
+            actual_ret = float(np.exp(actual_cum_log) - 1.0)  # spot return as fraction
+            zi = float(z[i])
+            pnl = 0.0
+            pos = 0
+
+            if strategy == "spot":
+                if zi > z_threshold:
+                    pnl = actual_cum_log - fee
+                    pos = 1
+                    if actual_cum_log > 0:
+                        wins += 1
+                elif zi < -z_threshold:
+                    pnl = -actual_cum_log - fee
+                    pos = -1
+                    if actual_cum_log < 0:
+                        wins += 1
+            elif strategy == "long_call":
+                if zi > z_threshold:
+                    intrinsic = max(0.0, actual_ret)
+                    net_ratio = intrinsic - atm_premium_ratio  # net % of notional
+                    pnl = float(np.log(max(1.0 + net_ratio, 1e-6))) - fee
+                    pos = 1
+                    if net_ratio > 0:
+                        wins += 1
+            elif strategy == "long_put":
+                if zi < -z_threshold:
+                    intrinsic = max(0.0, -actual_ret)
+                    net_ratio = intrinsic - atm_premium_ratio
+                    pnl = float(np.log(max(1.0 + net_ratio, 1e-6))) - fee
+                    pos = -1
+                    if net_ratio > 0:
+                        wins += 1
+            elif strategy == "long_straddle":
+                if abs(zi) > z_threshold:
+                    # Profit on a big move in either direction.
+                    intrinsic = abs(actual_ret)
+                    net_ratio = intrinsic - 2.0 * atm_premium_ratio
+                    pnl = float(np.log(max(1.0 + net_ratio, 1e-6))) - fee
+                    pos = 2
+                    if net_ratio > 0:
+                        wins += 1
+
+            if pos != 0:
                 trades += 1
-                if actual_cum > 0:
-                    wins += 1
-            elif z[i] < -z_threshold:
-                pnl = -actual_cum - fee
-                position_taken.append(-1)
-                trades += 1
-                if actual_cum < 0:
-                    wins += 1
-            else:
-                pnl = 0.0
-                position_taken.append(0)
+            position_taken.append(pos)
             cum_log_pnl += pnl
             equity.append({
                 "idx": int(b_i),
                 "cum_log_pnl": cum_log_pnl,
                 "cum_ret_pct": float(np.exp(cum_log_pnl) - 1) * 100,
-                "position": int(position_taken[-1]),
+                "position": pos,
             })
 
         win_rate = (wins / trades) if trades > 0 else 0.0
@@ -328,10 +381,14 @@ class SweepService:
             "horizon": horizon,
             "z_threshold": z_threshold,
             "fee_bps": fee_bps,
+            "strategy": strategy,
+            "annualized_vol": annualized_vol,
+            "atm_premium_pct": atm_premium_ratio * 100.0,
             "n_windows": len(equity),
             "trades": trades,
-            "longs": int(sum(1 for p in position_taken if p > 0)),
-            "shorts": int(sum(1 for p in position_taken if p < 0)),
+            "longs": int(sum(1 for p in position_taken if p == 1)),
+            "shorts": int(sum(1 for p in position_taken if p == -1)),
+            "straddles": int(sum(1 for p in position_taken if p == 2)),
             "flats": int(sum(1 for p in position_taken if p == 0)),
             "win_rate": win_rate,
             "total_return_pct": total_ret,
