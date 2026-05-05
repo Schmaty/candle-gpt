@@ -128,6 +128,7 @@ class V2InferenceModel:
     @torch.no_grad()
     def _run_inference_on_window(
         self, window_candles: list[dict], horizon: int, interval: str,
+        mode: str = "mean", temperature: float = 1.0, seed: Optional[int] = None,
     ) -> Optional[dict]:
         """Forward pass + autoregressive rollout starting from the last bar
         in ``window_candles``. Returns the prediction payload (probs, top5,
@@ -210,6 +211,8 @@ class V2InferenceModel:
                 step_probs = probs
                 step_expected_ret = expected_ret
                 step_variance = float((step_probs * (bin_centers_arr - step_expected_ret) ** 2).sum())
+                rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+                use_sample = (mode == "sample")
                 for i in range(HORIZON_BARS):
                     if i > 0:
                         # Build a synthetic bar at the previous step's predicted close
@@ -240,17 +243,30 @@ class V2InferenceModel:
                         step_expected_ret = float((step_probs * bin_centers_arr).sum())
                         step_variance = float((step_probs * (bin_centers_arr - step_expected_ret) ** 2).sum())
 
-                    cumulative_log_ret += step_expected_ret
+                    if use_sample:
+                        if temperature != 1.0:
+                            log_p = np.log(np.clip(step_probs, 1e-12, 1.0)) / max(temperature, 1e-6)
+                            log_p -= log_p.max()
+                            sampling_probs = np.exp(log_p)
+                            sampling_probs = sampling_probs / sampling_probs.sum()
+                        else:
+                            sampling_probs = step_probs
+                        sampled_idx = int(rng.choice(len(bin_centers_arr), p=sampling_probs))
+                        step_realised_ret = float(bin_centers_arr[sampled_idx])
+                    else:
+                        step_realised_ret = step_expected_ret
+
+                    cumulative_log_ret += step_realised_ret
                     cumulative_variance += step_variance
                     cum_std_i = float(np.sqrt(max(cumulative_variance, 1e-24)))
                     cum_z_i = cumulative_log_ret / cum_std_i
-                    new_close = running_close * float(np.exp(step_expected_ret))
+                    new_close = running_close * float(np.exp(step_realised_ret))
                     cum_close_i = last_close * float(np.exp(cumulative_log_ret))
                     new_open_ms = last_open_ms + (i + 1) * interval_ms
                     predicted_path.append({
                         "time": new_open_ms // 1000,
                         "close": new_close,
-                        "ret_bps": step_expected_ret * 1e4,
+                        "ret_bps": step_realised_ret * 1e4,
                         "cumulative_ret_bps": cumulative_log_ret * 1e4,
                         "cumulative_std_bps": cum_std_i * 1e4,
                         "cumulative_z": cum_z_i,
@@ -320,6 +336,9 @@ class V2InferenceModel:
         interval: str = "1m",
         horizon: int = 30,
         limit: int = 300,
+        mode: str = "sample",
+        temperature: float = 1.0,
+        seed: Optional[int] = None,
     ) -> dict:
         """Run a forecast anchored at a specific past bar.
 
@@ -378,6 +397,7 @@ class V2InferenceModel:
         window_candles = window_raw[-block_size:]
         prediction = self._run_inference_on_window(
             window_candles, horizon=int(horizon), interval=interval,
+            mode=mode, temperature=float(temperature), seed=seed,
         )
         if prediction is None:
             raise RuntimeError("inference failed; see server logs")

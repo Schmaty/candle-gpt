@@ -123,15 +123,27 @@ def predict(
     interval: str = "1m",
     horizon: int = 30,
     limit: int = 300,
+    mode: str = "sample",
+    temperature: float = 1.0,
+    seed: Optional[int] = None,
 ):
     """Run a forecast anchored at a specific past bar.
+
     Pass either ``anchor`` (0-based index into the latest ``limit`` bars at
     ``interval``) or ``anchor_time`` (unix seconds, the anchor bar's open
-    time). Returns a prediction payload shaped like the one in /candles."""
+    time). ``mode`` is "sample" (default — draw each step's return from the
+    model's distribution, gives a varying path) or "mean" (use the
+    expected value, gives a smooth path that collapses to the model's
+    central tendency). ``temperature`` sharpens (<1) or flattens (>1) the
+    distribution before sampling. ``seed`` makes the sample reproducible."""
     if interval not in _ALLOWED_INTERVALS:
         raise HTTPException(400, f"interval must be one of {sorted(_ALLOWED_INTERVALS)}")
     if anchor is None and anchor_time is None:
         raise HTTPException(400, "must specify anchor (index) or anchor_time (unix seconds)")
+    if mode not in ("sample", "mean"):
+        raise HTTPException(400, "mode must be 'sample' or 'mean'")
+    if not (0.05 <= temperature <= 5.0):
+        raise HTTPException(400, "temperature must be in [0.05, 5.0]")
     if inference.model is None:
         raise HTTPException(503, "no model loaded")
     horizon = max(1, min(int(horizon), 100))
@@ -140,6 +152,7 @@ def predict(
         return inference.predict_at_anchor(
             anchor=anchor, anchor_time=anchor_time,
             interval=interval, horizon=horizon, limit=limit,
+            mode=mode, temperature=temperature, seed=seed,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
