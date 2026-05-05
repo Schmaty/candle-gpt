@@ -4,15 +4,16 @@ from v2.model.config import ModelConfig
 
 
 def test_defaults():
+    # v2.1: scaled to ~30M params on 5m bars with 1024-bar context.
     cfg = ModelConfig()
-    assert cfg.n_features == 41
-    assert cfg.d_model == 384
-    assert cfg.n_heads == 6
-    assert cfg.n_layers == 6
+    assert cfg.n_features == 45
+    assert cfg.d_model == 512
+    assert cfg.n_heads == 8
+    assert cfg.n_layers == 10
     assert cfg.ffn_mult == 4
-    assert cfg.block_size == 512
+    assert cfg.block_size == 1024
     assert cfg.n_bins == 256
-    assert cfg.dropout == 0.1
+    assert cfg.dropout == 0.15
 
 
 def test_to_dict_from_dict_roundtrip():

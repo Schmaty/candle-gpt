@@ -6,14 +6,14 @@ from typing import Any
 
 @dataclass
 class ModelConfig:
-    n_features: int = 41
-    d_model: int = 384
-    n_heads: int = 6
-    n_layers: int = 6
+    n_features: int = 45
+    d_model: int = 512
+    n_heads: int = 8
+    n_layers: int = 10
     ffn_mult: int = 4
-    block_size: int = 512
+    block_size: int = 1024
     n_bins: int = 256
-    dropout: float = 0.1
+    dropout: float = 0.15
 
     def __post_init__(self) -> None:
         if self.d_model % self.n_heads != 0:

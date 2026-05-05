@@ -54,11 +54,12 @@ def test_causal_masking_future_independence():
         "Causal masking broken: past positions affected by future tokens"
 
 
-def test_parameter_count_approx_10m():
+def test_parameter_count_approx_30m():
+    # v2.1 default config targets ~30M params (d_model=512, 10L, 8H, ctx=1024).
     cfg = ModelConfig()
     model = CandleGPTv2(cfg)
     n_params = model.num_params()
-    assert 9_000_000 < n_params < 13_000_000, \
+    assert 27_000_000 < n_params < 36_000_000, \
         f"Unexpected param count: {n_params:,}"
 
 
