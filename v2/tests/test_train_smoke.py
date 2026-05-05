@@ -6,6 +6,7 @@ from pathlib import Path
 
 from v2.data.constants import Asset, Timeframe, FUNDING_COLUMNS, FUNDING_DTYPES
 from v2.data.store import write_klines, write_funding, write_liq_bucketed
+from v2.features.constants import N_FEATURES
 from v2.model.config import ModelConfig
 from v2.train.config import TrainConfig
 from v2.train.loop import train
@@ -54,15 +55,18 @@ def _write_synthetic_liq(path: Path, n: int = 2000) -> None:
 def test_smoke_10_steps(tmp_path: Path):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
-    _write_synthetic_klines(raw_dir / "btcusdt_1m.parquet", n=2000)
+    # 20k 1m bars resamples to 4k 5m bars — enough for window=32 + a train/val
+    # split. Default cfg.interval is "5m", so the dataset OHLCV-resamples on
+    # the fly and the tokenizer fits on 5m returns.
+    _write_synthetic_klines(raw_dir / "btcusdt_1m.parquet", n=20_000)
     _write_synthetic_funding(raw_dir / "funding_btcusdt.parquet")
-    _write_synthetic_liq(raw_dir / "liq_btcusdt_per_minute.parquet", n=2000)
+    _write_synthetic_liq(raw_dir / "liq_btcusdt_per_minute.parquet", n=20_000)
 
     cfg = TrainConfig(
         raw_dir=raw_dir,
         runs_dir=tmp_path / "runs",
         model=ModelConfig(
-            n_features=41, d_model=32, n_heads=4, n_layers=1,
+            n_features=N_FEATURES, d_model=32, n_heads=4, n_layers=1,
             block_size=32, n_bins=16, dropout=0.0,
         ),
         window=32,

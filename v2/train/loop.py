@@ -72,6 +72,7 @@ def _build_datasets(cfg: TrainConfig):
         liq_path=cfg.liq_path,
         apply_features=True,
         return_targets=True,
+        interval=cfg.interval,
     )
     n = len(full_ds)
     n_bars = full_ds._bars.shape[0]
@@ -188,6 +189,8 @@ def train(cfg: TrainConfig) -> str:
         d_model=cfg.model.d_model,
         n_bins=cfg.model.n_bins,
         window=cfg.window,
+        interval=cfg.interval,
+        n_features=cfg.model.n_features,
     )
     emitter = ProgressEmitter(
         cfg.run_dir, hw, model_specs,

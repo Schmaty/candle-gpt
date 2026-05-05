@@ -32,6 +32,8 @@ class ModelSpecs:
     d_model: int
     n_bins: int
     window: int
+    interval: str = "1m"
+    n_features: int = 0
 
 
 @dataclass

@@ -21,9 +21,13 @@ class TrainConfig:
     kline_file: str = "btcusdt_1m.parquet"
     funding_file: str = "funding_btcusdt.parquet"
     liq_file: str = "liq_btcusdt_per_minute.parquet"
-    window: int = 512
-    stride_train: int = 64
-    stride_val: int = 512
+    # Source parquet is always 1m; we OHLCV-resample on the fly to the
+    # training timeframe. Bin centers, feature stats, and run-time hyperparams
+    # all re-derive from the resampled stream.
+    interval: str = "5m"
+    window: int = 1024
+    stride_train: int = 16
+    stride_val: int = 1024
 
     # --- Split (by bar index) ---
     train_frac: float = 0.72

@@ -19,10 +19,14 @@ log = logging.getLogger(__name__)
 def main() -> None:
     ap = argparse.ArgumentParser(description="Train CandleGPTv2")
     ap.add_argument("--run-id", type=str, default=None)
-    ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--max-steps", type=int, default=200_000)
     ap.add_argument("--lr-max", type=float, default=3e-4)
-    ap.add_argument("--window", type=int, default=512)
+    ap.add_argument("--window", type=int, default=1024)
+    ap.add_argument("--interval", type=str, default="5m",
+                    help="Bar timeframe; 1m parquet is OHLCV-resampled on the fly.")
+    ap.add_argument("--stride-train", type=int, default=None,
+                    help="Override training-window stride (default from TrainConfig).")
     ap.add_argument("--raw-dir", type=Path, default=Path("v2/data/raw"))
     ap.add_argument("--runs-dir", type=Path, default=Path("v2/runs"))
     ap.add_argument("--eval-only", type=str, default=None)
@@ -37,7 +41,14 @@ def main() -> None:
         max_steps=args.max_steps,
         lr_max=args.lr_max,
         window=args.window,
+        interval=args.interval,
     )
+    if args.stride_train is not None:
+        cfg.stride_train = args.stride_train
+    # Keep model context length in sync with the training window so reductions
+    # in --window (e.g. to fit memory) shrink positional embeddings too.
+    if cfg.window != cfg.model.block_size:
+        cfg.model.block_size = cfg.window
     if args.max_wall_clock_h is not None:
         cfg.max_wall_clock_s = args.max_wall_clock_h * 3600.0
     if args.run_id:
