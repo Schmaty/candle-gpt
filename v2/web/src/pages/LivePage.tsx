@@ -89,21 +89,47 @@ function computeMetrics(
   }
 }
 
-// Turn the backend's close-only path into pseudo-OHLC candles whose open is
-// the previous bar's close. high/low collapse to the open/close range — the
-// model doesn't predict wicks, so we don't fake them.
-function pathToCandles(anchor: Candle, path: PredictedPoint[]): Candle[] {
+// Turn the backend's close-only path into OHLC candles. open[i] = close[i-1]
+// (open[0] = anchor's close). The model doesn't predict highs/lows, so we
+// synthesize wicks from the recent realized distribution: median upper-wick
+// and lower-wick lengths over the last ~30 bars, applied as additive offsets
+// on top of each predicted body. Body length also has a small floor based on
+// the typical bar's body size, so a near-zero predicted move still renders
+// as a visible candle instead of collapsing to a line.
+function pathToCandles(anchor: Candle, path: PredictedPoint[], history: Candle[]): Candle[] {
+  const recent = history.slice(-30)
+  const median = (arr: number[], fallback: number) => {
+    if (!arr.length) return fallback
+    const sorted = [...arr].sort((a, b) => a - b)
+    return sorted[Math.floor(sorted.length / 2)]
+  }
+  const upperWicks: number[] = []
+  const lowerWicks: number[] = []
+  const bodies: number[] = []
+  recent.forEach((c) => {
+    upperWicks.push(c.high - Math.max(c.open, c.close))
+    lowerWicks.push(Math.min(c.open, c.close) - c.low)
+    bodies.push(Math.abs(c.close - c.open))
+  })
+  const medUpperWick = Math.max(0, median(upperWicks, anchor.close * 0.0005))
+  const medLowerWick = Math.max(0, median(lowerWicks, anchor.close * 0.0005))
+  const medBody = Math.max(median(bodies, anchor.close * 0.0005), anchor.close * 0.0001)
+
   const out: Candle[] = []
   let prevClose = anchor.close
   path.forEach((p) => {
     const open = prevClose
     const close = p.close
+    const bodyTop = Math.max(open, close)
+    const bodyBot = Math.min(open, close)
+    const body = bodyTop - bodyBot
+    const padding = Math.max(0, (medBody - body) / 2)
     out.push({
       time: p.time,
       open,
       close,
-      high: Math.max(open, close),
-      low: Math.min(open, close),
+      high: bodyTop + padding + medUpperWick,
+      low: bodyBot - padding - medLowerWick,
       volume: 0,
     })
     prevClose = close
@@ -333,7 +359,7 @@ export function LivePage() {
 
   const predictedCandles: Candle[] = useMemo(() => {
     if (!activeCandle || !activePrediction?.predicted_path) return []
-    return pathToCandles(activeCandle, activePrediction.predicted_path)
+    return pathToCandles(activeCandle, activePrediction.predicted_path, candles)
   }, [activeCandle, activePrediction])
 
   // Real future bars after the anchor (only present for past anchors). For
@@ -560,19 +586,23 @@ export function LivePage() {
                   const x = xForGlobalIndex(globalIdx)
                   if (x == null) return null
                   const px = x + 1.5
+                  const up = p.close >= p.open
+                  const bodyFill = up ? 'rgba(74, 222, 128, 0.45)' : 'rgba(251, 113, 133, 0.45)'
+                  const bodyStroke = up ? '#4ade80' : '#fb7185'
                   return (
                     <g key={`pred-${stepIdx}`} className="tcp-pred-candle" style={{ animationDelay: `${stepIdx * 14}ms` }}>
                       <line x1={px + (candleWidth - 3) / 2} x2={px + (candleWidth - 3) / 2}
                             y1={y(p.high)} y2={y(p.low)}
-                            stroke="#7dd3fc" strokeWidth={1.5} strokeDasharray="2 2" />
+                            stroke={bodyStroke} strokeWidth={1.25} strokeDasharray="2 2" opacity={0.85} />
                       <rect x={px}
                             y={Math.min(y(p.open), y(p.close))}
                             width={candleWidth - 3}
                             height={Math.max(1.5, Math.abs(y(p.open) - y(p.close)))}
                             rx={0.5}
-                            fill="rgba(125, 211, 252, 0.3)"
-                            stroke="#7dd3fc"
-                            strokeWidth={1} />
+                            fill={bodyFill}
+                            stroke={bodyStroke}
+                            strokeWidth={1}
+                            strokeDasharray="2 2" />
                     </g>
                   )
                 })}
