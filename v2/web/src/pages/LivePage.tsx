@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { createChart, type IChartApi, CandlestickSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'
-import { fetchCandles } from '../api'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { fetchCandles, fetchPredictAtAnchor } from '../api'
 
 interface Candle {
   time: number
@@ -9,6 +8,7 @@ interface Candle {
   low: number
   close: number
   volume: number
+  i?: number
 }
 
 interface PredictedPoint {
@@ -16,747 +16,748 @@ interface PredictedPoint {
   close: number
   ret_bps: number
   cumulative_ret_bps: number
-  cumulative_std_bps?: number
-  cumulative_z?: number
-  cumulative_close?: number
-  horizon?: number
+  cumulative_std_bps: number
+  cumulative_z: number
+  cumulative_close: number
+  horizon: number
 }
 
 interface Prediction {
-  top5_rets: number[]
-  top5_probs: number[]
-  probs: number[]
-  bin_centers: number[]
+  predicted_path: PredictedPoint[]
+  horizon_bars: number
+  horizon_cumulative_ret: number
+  horizon_cumulative_close: number
+  horizon_cumulative_std: number
+  horizon_cumulative_z: number
+  last_close: number
+  expected_close: number
+  expected_ret: number
+  confidence: number
+  entropy_bits: number
+  max_entropy_bits: number
   p_up: number
   p_down: number
   p_flat: number
-  flat_eps: number
-  expected_ret: number
-  expected_close: number
-  last_close: number
-  entropy_bits: number
-  max_entropy_bits: number
-  confidence: number
-  predicted_path?: PredictedPoint[]
-  horizon_bars?: number
-  horizon_cumulative_ret?: number
-  horizon_cumulative_close?: number
-  horizon_cumulative_std?: number
-  horizon_cumulative_z?: number
 }
+
+type Interval = '1m' | '5m' | '15m' | '1h' | '4h' | '1d'
+
+// "What kind of bar is this?" — pure shape function. Mirrors the reference
+// component but uses scale-invariant (% of close) thresholds so it stays
+// useful across asset prices (BTC at $80k vs an altcoin at $0.50).
+function tokenize(c: Candle) {
+  const body = c.close - c.open
+  const range = Math.max(c.close * 1e-9, c.high - c.low)
+  const bodyRatio = Math.abs(body) / range
+  const upperWick = c.high - Math.max(c.open, c.close)
+  const lowerWick = Math.min(c.open, c.close) - c.low
+  const rangePct = range / Math.max(1e-9, c.close)
+  const flatEps = c.close * 5e-5  // 5 bps
+  return {
+    direction: body > flatEps ? 'UP' : body < -flatEps ? 'DOWN' : 'FLAT',
+    body: bodyRatio > 0.65 ? 'LARGE' : bodyRatio > 0.3 ? 'MED' : 'SMALL',
+    upper: upperWick / range > 0.35 ? 'LONG_UPPER' : 'SHORT_UPPER',
+    lower: lowerWick / range > 0.35 ? 'LONG_LOWER' : 'SHORT_LOWER',
+    range: rangePct > 0.005 ? 'WIDE' : rangePct > 0.001 ? 'NORMAL' : 'TIGHT',
+  }
+}
+
+// Compare predicted closes vs actual closes for past anchors (where the
+// real future is known). Direction match is computed bar-vs-bar (sign of
+// (close - open)) — for predicted bars the synthetic open is the previous
+// predicted close, so this measures cumulative direction agreement.
+function computeMetrics(
+  realFuture: Candle[],
+  predictions: Candle[],
+): { count: number; closeMae: number; directionAccuracy: number; avgPctError: number } | null {
+  const pairs: [Candle, Candle][] = []
+  predictions.forEach((p, idx) => {
+    const r = realFuture[idx]
+    if (r) pairs.push([r, p])
+  })
+  if (!pairs.length) return null
+  const closeMae = pairs.reduce((s, [r, p]) => s + Math.abs(r.close - p.close), 0) / pairs.length
+  const directionHits = pairs.filter(
+    ([r, p]) => Math.sign(r.close - r.open) === Math.sign(p.close - p.open),
+  ).length
+  const avgPctError = pairs.reduce((s, [r, p]) => s + Math.abs(r.close - p.close) / r.close, 0) / pairs.length
+  return {
+    count: pairs.length,
+    closeMae,
+    directionAccuracy: directionHits / pairs.length,
+    avgPctError,
+  }
+}
+
+// Turn the backend's close-only path into pseudo-OHLC candles whose open is
+// the previous bar's close. high/low collapse to the open/close range — the
+// model doesn't predict wicks, so we don't fake them.
+function pathToCandles(anchor: Candle, path: PredictedPoint[]): Candle[] {
+  const out: Candle[] = []
+  let prevClose = anchor.close
+  path.forEach((p) => {
+    const open = prevClose
+    const close = p.close
+    out.push({
+      time: p.time,
+      open,
+      close,
+      high: Math.max(open, close),
+      low: Math.min(open, close),
+      volume: 0,
+    })
+    prevClose = close
+  })
+  return out
+}
+
+const STYLE = `
+.tcp-root {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(56, 189, 248, 0.08), transparent),
+    radial-gradient(ellipse 60% 40% at 100% 100%, rgba(244, 114, 182, 0.04), transparent),
+    #0a0a0b;
+  color: #e8e6e1;
+  letter-spacing: -0.01em;
+  position: relative;
+  isolation: isolate;
+  border-radius: 14px;
+  padding: 28px 28px 32px;
+  overflow: hidden;
+}
+.tcp-root::before {
+  content: '';
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+  z-index: -1;
+}
+.tcp-display {
+  font-family: 'Fraunces', 'Georgia', serif;
+  font-feature-settings: 'ss01', 'ss02';
+  letter-spacing: -0.025em;
+}
+.tcp-panel {
+  background: linear-gradient(180deg, rgba(24, 24, 27, 0.7) 0%, rgba(15, 15, 17, 0.7) 100%);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 20px 60px -20px rgba(0, 0, 0, 0.6);
+  border-radius: 16px;
+}
+.tcp-pred-candle {
+  animation: tcp-draw 240ms cubic-bezier(0.2, 0.7, 0.3, 1) backwards;
+}
+@keyframes tcp-draw {
+  from { opacity: 0; transform: translateY(6px) scaleY(0.6); transform-origin: center; }
+  to { opacity: 1; transform: translateY(0) scaleY(1); }
+}
+.tcp-pred-line {
+  stroke-dasharray: 800;
+  stroke-dashoffset: 800;
+  animation: tcp-stroke 600ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+@keyframes tcp-stroke { to { stroke-dashoffset: 0; } }
+.tcp-cursor-line { stroke-dasharray: 2 4; opacity: 0.5; }
+.tcp-tick { font-size: 10px; fill: #6b6b6b; }
+.tcp-status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 8px #4ade80, 0 0 0 3px rgba(74, 222, 128, 0.15);
+  animation: tcp-pulse 2s ease-in-out infinite;
+  display: inline-block;
+}
+@keyframes tcp-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.tcp-divider {
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
+  height: 1px;
+}
+.tcp-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.02);
+  color: #d4d4d8;
+  cursor: default;
+}
+.tcp-pill.btn { cursor: pointer; transition: border-color 150ms, color 150ms; }
+.tcp-pill.btn:hover { border-color: rgba(125, 211, 252, 0.5); color: #7dd3fc; }
+.tcp-pill.btn.active { border-color: #7dd3fc; color: #7dd3fc; background: rgba(125, 211, 252, 0.06); }
+.tcp-meter-bg {
+  background: rgba(255,255,255,0.04);
+  border-radius: 999px;
+  overflow: hidden;
+  height: 4px;
+}
+.tcp-meter-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #38bdf8, #818cf8);
+  transition: width 400ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+.tcp-empty-hint { animation: tcp-float 3s ease-in-out infinite; }
+@keyframes tcp-float {
+  0%, 100% { transform: translateY(0); opacity: 0.7; }
+  50% { transform: translateY(-3px); opacity: 1; }
+}
+.tcp-pin-btn {
+  width: 100%;
+  border-radius: 16px;
+  padding: 12px 14px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: transform 150ms;
+  background: linear-gradient(180deg, #fafafa, #d4d4d8);
+  color: #0a0a0b;
+  box-shadow: 0 4px 14px -2px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.5);
+  border: none;
+  font-family: inherit;
+}
+.tcp-pin-btn:hover { transform: translateY(-1px); }
+.tcp-pin-btn:active { transform: translateY(0); }
+.tcp-fonts {
+  /* Triggers Google Font loading without visible ::before content. */
+  position: absolute; visibility: hidden; pointer-events: none;
+  font-family: 'JetBrains Mono', 'Fraunces', sans-serif;
+}
+`
+
+// Inject the Google Fonts <link> once per page-load.
+let _fontsInjected = false
+function ensureFonts() {
+  if (_fontsInjected || typeof document === 'undefined') return
+  _fontsInjected = true
+  const link = document.createElement('link')
+  link.rel = 'stylesheet'
+  link.href = 'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,800&display=swap'
+  document.head.appendChild(link)
+}
+
+const HORIZON = 30
+const FETCH_LIMIT = 300
 
 export function LivePage() {
-  const chartRef = useRef<HTMLDivElement>(null)
-  const chart = useRef<IChartApi | null>(null)
-  const candleSeries = useRef<any>(null)
-  const predictionLine = useRef<any>(null)
-  const predictionMarkers = useRef<any>(null)
-  const [prediction, setPrediction] = useState<Prediction | null>(null)
-  const [lastPrice, setLastPrice] = useState<number | null>(null)
+  const [candles, setCandles] = useState<Candle[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [limit, setLimit] = useState(300)
-  const [interval, setIntervalTf] = useState<'1m' | '5m' | '15m' | '1h' | '4h' | '1d'>('1m')
+  const [interval, setIntervalTf] = useState<Interval>('1m')
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
+  const [pinnedIndex, setPinnedIndex] = useState<number | null>(null)
+  const [predCache, setPredCache] = useState<Map<string, Prediction>>(new Map())
+  const [pendingAnchor, setPendingAnchor] = useState<number | null>(null)
+  const inFlightRef = useRef<Set<string>>(new Set())
 
+  const activeIndex = hoveredIndex ?? pinnedIndex
+  const cacheKey = (anchorTime: number) => `${interval}|${anchorTime}|${HORIZON}`
+
+  useEffect(() => { ensureFonts() }, [])
+
+  // Refresh candles whenever interval changes.
   useEffect(() => {
-    if (!chartRef.current) return
-    const c = createChart(chartRef.current, {
-      layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
-      grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
-      rightPriceScale: { borderColor: '#252d3d' },
-      timeScale: { borderColor: '#252d3d', timeVisible: true, secondsVisible: false },
-      width: chartRef.current.clientWidth,
-      height: 380,
-    })
-    const cs = c.addSeries(CandlestickSeries, {
-      upColor: '#00d4aa', downColor: '#f05252',
-      borderUpColor: '#00d4aa', borderDownColor: '#f05252',
-      wickUpColor: '#00d4aa', wickDownColor: '#f05252',
-    })
-    // Dashed prediction line — gets data set whenever a new prediction arrives.
-    // pointMarkersVisible draws a dot at every (time, price) sample so each
-    // future bar's predicted close is called out, not just connected by a line.
-    const pl = c.addSeries(LineSeries, {
-      color: '#f5a623',
-      lineWidth: 2,
-      lineStyle: 2,        // dashed
-      crosshairMarkerVisible: true,
-      crosshairMarkerRadius: 6,
-      pointMarkersVisible: true,
-      pointMarkersRadius: 4,
-      lastValueVisible: false,
-      priceLineVisible: false,
-      title: 'predicted',
-    })
-    chart.current = c
-    candleSeries.current = cs
-    predictionLine.current = pl
-    predictionMarkers.current = createSeriesMarkers(pl, [])
-
-    const ro = new ResizeObserver(() => {
-      if (chartRef.current) c.resize(chartRef.current.clientWidth, 380)
-    })
-    ro.observe(chartRef.current)
-    return () => { ro.disconnect(); c.remove() }
-  }, [])
-
-  const load = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const data = await fetchCandles(limit, interval)
-      const candles: Candle[] = data.candles ?? []
-      if (candles.length > 0) {
-        const chartData = candles.map(c => ({
-          time: c.time as any,
-          open: c.open, high: c.high, low: c.low, close: c.close,
-        }))
-        candleSeries.current?.setData(chartData)
-        setLastPrice(candles[candles.length - 1].close)
-
-        // Plot the model's predicted path: anchor at the last actual close,
-        // then a point at each future bar (1..30 in the chosen TF). Dots
-        // appear at every sample via pointMarkersVisible; on top of that we
-        // overlay text labels at notable horizons so the user can read the
-        // dollar value off the chart.
-        const path: PredictedPoint[] | undefined = data.prediction?.predicted_path
-        if (path && path.length > 0) {
-          const lastBar = candles[candles.length - 1]
-          const line = [
-            { time: lastBar.time as any, value: lastBar.close },
-            ...path.map(pt => ({ time: pt.time as any, value: pt.close })),
-          ]
-          predictionLine.current?.setData(line)
-
-          // Text labels at hard-coded horizons that fit within the path length.
-          const labelHorizons = [1, 5, 10, 20, 30].filter(h => h <= path.length)
-          const markers = labelHorizons.map(h => {
-            const pt = path[h - 1]
-            const direction = pt.cumulative_z != null
-              ? (pt.cumulative_z > 0 ? 'up' : pt.cumulative_z < 0 ? 'down' : 'flat')
-              : 'flat'
-            const color = direction === 'up' ? '#00d4aa'
-              : direction === 'down' ? '#f05252'
-              : '#8492a6'
-            return {
-              time: pt.time as any,
-              position: (direction === 'down' ? 'aboveBar' : 'belowBar') as 'aboveBar' | 'belowBar',
-              color,
-              shape: 'circle' as const,
-              text: `H${h} $${pt.close.toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
-              size: 1,
-            }
-          })
-          predictionMarkers.current?.setMarkers(markers)
-        } else {
-          predictionLine.current?.setData([])
-          predictionMarkers.current?.setMarkers([])
-        }
-        chart.current?.timeScale().fitContent()
+    let cancelled = false
+    const reload = async () => {
+      setLoading(true)
+      setError(null)
+      try {
+        const data = await fetchCandles(FETCH_LIMIT, interval)
+        if (cancelled) return
+        const cs: Candle[] = (data.candles ?? []).map((c: Candle, i: number) => ({ ...c, i }))
+        setCandles(cs)
+      } catch (e: any) {
+        if (!cancelled) setError(e.message)
+      } finally {
+        if (!cancelled) setLoading(false)
       }
-      setPrediction(data.prediction ?? null)
-    } catch (e: any) {
-      setError(e.message)
-    } finally {
-      setLoading(false)
     }
-  }
+    reload()
+    // Auto-refresh: re-fetch candles every 30s. Cached predictions (keyed
+    // on anchor_time) survive the refresh so a pinned forecast stays put.
+    const id = window.setInterval(reload, 30_000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [interval])
 
-  useEffect(() => { load() }, [limit, interval])
-
+  // When the active anchor changes, fetch its prediction (unless cached).
   useEffect(() => {
-    const id = setInterval(load, 30_000)
-    return () => clearInterval(id)
-  }, [limit, interval])
+    if (activeIndex == null || candles.length === 0) return
+    const c = candles[activeIndex]
+    if (!c) return
+    const key = cacheKey(c.time)
+    if (predCache.has(key) || inFlightRef.current.has(key)) return
+    inFlightRef.current.add(key)
+    setPendingAnchor(activeIndex)
+    fetchPredictAtAnchor({ anchorTime: c.time, interval, horizon: HORIZON })
+      .then((res) => {
+        setPredCache((m) => {
+          const n = new Map(m)
+          n.set(key, res.prediction as Prediction)
+          return n
+        })
+      })
+      .catch((e) => {
+        // Cache the failure as null so we don't retry every hover.
+        setPredCache((m) => {
+          const n = new Map(m)
+          n.set(key, null as any)
+          return n
+        })
+        console.warn('predict failed:', e.message)
+      })
+      .finally(() => {
+        inFlightRef.current.delete(key)
+        setPendingAnchor((p) => (p === activeIndex ? null : p))
+      })
+  }, [activeIndex, candles, interval, predCache])
 
-  const ret2pct = (r: number) => `${r >= 0 ? '+' : ''}${(r * 100).toFixed(3)}%`
-  const ret2bps = (r: number) => `${r >= 0 ? '+' : ''}${(r * 10000).toFixed(2)} bps`
-  const fmtPrice = (p: number) => `$${p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  const activeCandle = activeIndex != null ? candles[activeIndex] : null
+  const activePrediction: Prediction | null = useMemo(() => {
+    if (!activeCandle) return null
+    const key = cacheKey(activeCandle.time)
+    return predCache.get(key) ?? null
+  }, [activeCandle, predCache, interval])
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Toolbar */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 18, color: 'var(--accent)' }}>
-          BTC/USDT {lastPrice != null ? `$${lastPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ''}
-        </span>
+  const predictedCandles: Candle[] = useMemo(() => {
+    if (!activeCandle || !activePrediction?.predicted_path) return []
+    return pathToCandles(activeCandle, activePrediction.predicted_path)
+  }, [activeCandle, activePrediction])
 
-        {/* Timeframe selector */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 4 }}>TF</span>
-          {(['1m', '5m', '15m', '1h', '4h', '1d'] as const).map(tf => (
-            <button key={tf} className={interval === tf ? 'active' : ''} onClick={() => setIntervalTf(tf)}>{tf}</button>
-          ))}
-        </div>
+  // Real future bars after the anchor (only present for past anchors). For
+  // each predicted bar, look up the matching real bar by index.
+  const realFuture: Candle[] = useMemo(() => {
+    if (activeIndex == null) return []
+    return candles.slice(activeIndex + 1, activeIndex + 1 + predictedCandles.length)
+  }, [activeIndex, candles, predictedCandles.length])
 
-        {/* Bar-count selector */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 4 }}>Bars</span>
-          {[100, 200, 300, 500].map(l => (
-            <button key={l} className={limit === l ? 'active' : ''} onClick={() => setLimit(l)}>{l}</button>
-          ))}
-        </div>
+  const metrics = useMemo(() => computeMetrics(realFuture, predictedCandles), [realFuture, predictedCandles])
+  const activeToken = activeCandle ? tokenize(activeCandle) : null
 
-        <button onClick={load} disabled={loading}>{loading ? 'Loading…' : 'Refresh'}</button>
-        {interval !== '1m' && (
-          <span style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            model trained on 1m — running on {interval} (assumes pattern transfer)
-          </span>
-        )}
-        {error && <span style={{ color: 'var(--red)', fontSize: 12 }}>{error}</span>}
-      </div>
+  // Forecast headline: % change from anchor close to last predicted close.
+  const forecastDelta = predictedCandles.length && activeCandle ? predictedCandles[predictedCandles.length - 1].close - activeCandle.close : 0
+  const forecastPct = activeCandle && activeCandle.close ? (forecastDelta / activeCandle.close) * 100 : 0
 
-      {/* Chart */}
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-        <div style={{ padding: '10px 14px', fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #1c2230' }}>
-          BTC/USDT {interval} candles  ·  <span style={{ color: '#f5a623', textTransform: 'none', letterSpacing: 0 }}>— — — {prediction?.horizon_bars ?? 30}-bar predicted path</span>
-          {prediction?.predicted_path && prediction.predicted_path.length > 0 && (
-            <span style={{ color: 'var(--fg-dim)', textTransform: 'none', letterSpacing: 0, marginLeft: 12, fontFamily: 'var(--font-mono)' }}>
-              end ≈ ${prediction.predicted_path[prediction.predicted_path.length - 1].close.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-              {' · '}
-              cum {(prediction.predicted_path[prediction.predicted_path.length - 1].cumulative_ret_bps).toFixed(1)} bps
-            </span>
-          )}
-        </div>
-        <div ref={chartRef} style={{ width: '100%' }} />
-      </div>
+  // Visible window: last ~140 bars, with room for the predicted overlay.
+  const VISIBLE_TAIL = 140
+  const tailStart = Math.max(0, candles.length - VISIBLE_TAIL)
+  const visible = useMemo(() => candles.slice(tailStart), [candles, tailStart])
 
-      {/* Prediction */}
-      {prediction ? (
-        <PredictionCard p={prediction} interval={interval} ret2pct={ret2pct} ret2bps={ret2bps} fmtPrice={fmtPrice} />
-      ) : (
-        <div className="card" style={{ color: 'var(--fg-dim)', fontSize: 13 }}>
-          No model loaded — predictions unavailable. Train a model first.
-        </div>
-      )}
-    </div>
-  )
-}
+  // ---- chart geometry --------------------------------------------------
+  const chartHeight = 460
+  const candleWidth = 7
+  const gap = 3
+  const leftPad = 28
+  const rightPad = 56
+  const predOffset = predictedCandles.length
+    ? Math.max(0, (visible[visible.length - 1]?.i ?? 0) - (activeIndex ?? 0))
+    : 0
+  // Reserve space at the right for predicted bars that extend past the
+  // last visible real bar, so they actually fit on screen.
+  const predOverflow = predictedCandles.length
+    ? Math.max(0, predictedCandles.length - predOffset)
+    : 0
+  const chartWidth = (visible.length + predOverflow) * (candleWidth + gap) + leftPad + rightPad
 
-function PredictionCard({
-  p,
-  interval,
-  ret2pct,
-  ret2bps,
-  fmtPrice,
-}: {
-  p: Prediction
-  interval: string
-  ret2pct: (r: number) => string
-  ret2bps: (r: number) => string
-  fmtPrice: (p: number) => string
-}) {
-  const direction =
-    p.p_up > p.p_down && p.p_up > p.p_flat ? { label: 'UP',   color: 'var(--accent)' } :
-    p.p_down > p.p_up && p.p_down > p.p_flat ? { label: 'DOWN', color: 'var(--red)' } :
-                                                { label: 'FLAT', color: 'var(--fg-dim)' }
+  const minPrice = useMemo(() => {
+    let m = Infinity
+    visible.forEach((c) => { if (c.low < m) m = c.low })
+    predictedCandles.forEach((c) => { if (c.low < m) m = c.low })
+    return m === Infinity ? 0 : m
+  }, [visible, predictedCandles])
+  const maxPrice = useMemo(() => {
+    let m = -Infinity
+    visible.forEach((c) => { if (c.high > m) m = c.high })
+    predictedCandles.forEach((c) => { if (c.high > m) m = c.high })
+    return m === -Infinity ? 1 : m
+  }, [visible, predictedCandles])
 
-  const conf = p.confidence
-  const confLabel =
-    conf < 0.05 ? 'very low — model unsure' :
-    conf < 0.15 ? 'low' :
-    conf < 0.30 ? 'moderate' :
-    conf < 0.55 ? 'high' :
-                  'very high'
-
-  const priceDelta = p.expected_close - p.last_close
-  const priceDeltaSign = priceDelta >= 0 ? '+' : ''
-
-  const pctRow = (label: string, prob: number, color: string) => (
-    <div style={{ display: 'grid', gridTemplateColumns: '60px 1fr 70px', gap: 10, alignItems: 'center' }}>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color }}>{label}</span>
-      <div style={{ height: 12, background: 'var(--bg-elevated)', borderRadius: 2, overflow: 'hidden' }}>
-        <div style={{ height: '100%', width: `${(prob * 100).toFixed(1)}%`, background: color, opacity: 0.85 }} />
-      </div>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg)', textAlign: 'right' }}>
-        {(prob * 100).toFixed(1)}%
-      </span>
-    </div>
-  )
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <TradeWheel p={p} interval={interval} ret2bps={ret2bps} fmtPrice={fmtPrice} />
-
-      <div className="card">
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>
-          Prediction detail
-        </div>
-
-        {/* Headline */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 18 }}>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 4 }}>Direction ({interval} ahead)</div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-              <span style={{ fontSize: 26, fontWeight: 700, color: direction.color, fontFamily: 'var(--font-mono)' }}>
-                {direction.label}
-              </span>
-              <span style={{ fontSize: 13, color: 'var(--fg-dim)' }}>
-                conf {(conf * 100).toFixed(1)}% — {confLabel}
-              </span>
-            </div>
-          </div>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 4 }}>Expected next close</div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-              <span style={{ fontSize: 22, fontWeight: 600, color: 'var(--fg)', fontFamily: 'var(--font-mono)' }}>
-                {fmtPrice(p.expected_close)}
-              </span>
-              <span style={{
-                fontFamily: 'var(--font-mono)',
-                fontSize: 13,
-                color: priceDelta > 0 ? 'var(--accent)' : priceDelta < 0 ? 'var(--red)' : 'var(--fg-dim)',
-              }}>
-                {priceDeltaSign}{priceDelta.toFixed(2)} ({ret2bps(p.expected_ret)})
-              </span>
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 2 }}>
-              from {fmtPrice(p.last_close)}
-            </div>
-          </div>
-        </div>
-
-        {/* Direction breakdown */}
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Aggregated probability  <span style={{ textTransform: 'none', letterSpacing: 0 }}>· “flat” = |return| &lt; {(p.flat_eps * 100).toFixed(2)}%</span>
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 18 }}>
-          {pctRow('Up',   p.p_up,   'var(--accent)')}
-          {pctRow('Flat', p.p_flat, 'var(--fg-dim)')}
-          {pctRow('Down', p.p_down, 'var(--red)')}
-        </div>
-
-        {/* Histogram */}
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Full distribution — {p.probs.length} return bins (left = most negative, right = most positive)
-        </div>
-        <ProbHistogram probs={p.probs} centers={p.bin_centers} flatEps={p.flat_eps} />
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--fg-dim)', marginTop: 4 }}>
-          <span>{ret2pct(p.bin_centers[0])}</span>
-          <span>0</span>
-          <span>{ret2pct(p.bin_centers[p.bin_centers.length - 1])}</span>
-        </div>
-
-        {/* Top-5 detail */}
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 18, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Top 5 most-likely bins
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {p.top5_rets.map((ret, i) => {
-            const prob = p.top5_probs[i]
-            const color = ret > p.flat_eps ? 'var(--accent)' : ret < -p.flat_eps ? 'var(--red)' : 'var(--fg-dim)'
-            return (
-              <div key={i} style={{ display: 'grid', gridTemplateColumns: '90px 50px 1fr 60px', gap: 10, alignItems: 'center' }}>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color }}>
-                  {ret2bps(ret)}
-                </span>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--fg-dim)' }}>
-                  {ret2pct(ret)}
-                </span>
-                <div style={{ height: 10, background: 'var(--bg-elevated)', borderRadius: 2, overflow: 'hidden' }}>
-                  <div style={{ height: '100%', width: `${(prob * 100).toFixed(1)}%`, background: color, opacity: 0.8 }} />
-                </div>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg)', textAlign: 'right' }}>
-                  {(prob * 100).toFixed(2)}%
-                </span>
-              </div>
-            )
-          })}
-        </div>
-
-        {/* Footer caveats */}
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 16, lineHeight: 1.6 }}>
-          Model entropy {p.entropy_bits.toFixed(2)} / {p.max_entropy_bits.toFixed(2)} bits.
-          A freshly-trained model with confidence under 10% is essentially saying “I don’t know.”
-          Expected close treats the bin distribution as a probability over log-returns.
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function TradeWheel({
-  p,
-  interval,
-  ret2bps,
-  fmtPrice,
-}: {
-  p: Prediction
-  interval: string
-  ret2bps: (r: number) => string
-  fmtPrice: (price: number) => string
-}) {
-  const conf = p.confidence
-  const maxHorizon = p.horizon_bars ?? p.predicted_path?.length ?? 30
-  const [selectedHorizon, setSelectedHorizon] = useState<number>(maxHorizon)
-
-  // Keep the slider in range when the server changes its horizon length.
-  useEffect(() => {
-    if (selectedHorizon > maxHorizon) setSelectedHorizon(maxHorizon)
-  }, [maxHorizon])
-
-  // Per-bar variance — only used as a fallback for very short paths.
-  let variance = 0
-  for (let i = 0; i < p.probs.length; i++) {
-    const d = p.bin_centers[i] - p.expected_ret
-    variance += p.probs[i] * d * d
+  const y = (price: number) => {
+    const padding = 28
+    return padding + ((maxPrice - price) / Math.max(1e-9, maxPrice - minPrice)) * (chartHeight - padding * 2)
   }
-  const perBarStd = Math.sqrt(Math.max(variance, 1e-12))
+  const ticks = useMemo(() => {
+    const out: number[] = []
+    const steps = 6
+    for (let i = 0; i <= steps; i++) {
+      out.push(minPrice + ((maxPrice - minPrice) * i) / steps)
+    }
+    return out
+  }, [minPrice, maxPrice])
 
-  // Pick the requested horizon's stats out of the predicted path.
-  // Path entries are 1-indexed (entry[0] = horizon 1).
-  const path = p.predicted_path ?? []
-  const idx = Math.max(0, Math.min(path.length - 1, selectedHorizon - 1))
-  const entry = path[idx]
-  const cumRet = (entry?.cumulative_ret_bps ?? (p.horizon_cumulative_ret ?? p.expected_ret) * 1e4) / 1e4
-  const cumStd = (entry?.cumulative_std_bps ?? (p.horizon_cumulative_std ?? perBarStd) * 1e4) / 1e4
-  const cumClose = entry?.cumulative_close ?? p.horizon_cumulative_close ?? p.expected_close
-  const zScore = entry?.cumulative_z ?? p.horizon_cumulative_z ?? (cumRet / Math.max(cumStd, 1e-12))
-  const horizonBars = selectedHorizon
-
-  // Verb is driven by the cumulative-horizon z-score so the recommendation
-  // reflects the model's lean over the full 30-bar forecast, not a single
-  // step. Confidence is shown as a sub-label suffix; we don't silence the
-  // lean when confidence is low — the bar below tells the user whether to act.
-  const convictionTag =
-    conf < 0.05 ? ' · very low conviction' :
-    conf < 0.15 ? ' · low conviction' :
-    conf < 0.30 ? ' · moderate conviction' :
-                  ' · high conviction'
-
-  const verb =
-    zScore >=  1.00 ? { label: 'STRONG BUY',  color: '#00d4aa', sub: `Cumulative ${horizonBars}-bar lean strongly up` + convictionTag } :
-    zScore >=  0.30 ? { label: 'BUY',          color: '#00d4aa', sub: `Mild upward lean over ${horizonBars} bars` + convictionTag } :
-    zScore <= -1.00 ? { label: 'STRONG SELL', color: '#f05252', sub: `Cumulative ${horizonBars}-bar lean strongly down` + convictionTag } :
-    zScore <= -0.30 ? { label: 'SELL',         color: '#f05252', sub: `Mild downward lean over ${horizonBars} bars` + convictionTag } :
-                      { label: 'HOLD',         color: 'var(--fg-dim)', sub: `Net ${horizonBars}-bar lean near zero` + convictionTag }
-
-  // Confidence bucket label + color.
-  const confBucket =
-    conf < 0.05 ? { label: 'very low',  color: '#f05252' } :
-    conf < 0.15 ? { label: 'low',       color: '#f5a623' } :
-    conf < 0.30 ? { label: 'moderate',  color: '#f5a623' } :
-    conf < 0.55 ? { label: 'high',      color: '#00d4aa' } :
-                  { label: 'very high', color: '#00d4aa' }
-
-  // Needle math. 180° arc from −90° (Sell, far left) to +90° (Buy, far right).
-  // Equation:   θ = tanh(E[r] / σ) · 90°
-  // where E[r] = Σ pᵢ · cᵢ is the model's expected return and σ is the std-dev
-  // of that distribution. tanh squashes any z-score into (−1, 1) so the needle
-  // always points in the average direction without saturating instantly.
-  const tanh = (x: number) => Math.tanh(x)
-  const needleDeg = tanh(zScore) * 90
-  const needleRad = (needleDeg - 90) * Math.PI / 180  // SVG: 0° points right, so subtract 90 to put 0 at top.
-
-  // SVG geometry — half-circle dial.
-  const W = 320, H = 200
-  const cx = W / 2, cy = H - 18
-  const rOuter = 130, rTickOuter = 130, rTickInner = 116
-  const rNeedleTip = 110, rNeedleBase = 12
-
-  // Build the half-circle arc path (sweep left to right across the top).
-  const arcStart = { x: cx - rOuter, y: cy }
-  const arcEnd = { x: cx + rOuter, y: cy }
-  const arcPath = `M ${arcStart.x} ${arcStart.y} A ${rOuter} ${rOuter} 0 0 1 ${arcEnd.x} ${arcEnd.y}`
-
-  // Tick marks every 15° from -90° to +90° (13 ticks).
-  const ticks: { x1: number, y1: number, x2: number, y2: number, color: string, w: number }[] = []
-  for (let deg = -90; deg <= 90; deg += 15) {
-    const rad = (deg - 90) * Math.PI / 180
-    const x1 = cx + rTickInner * Math.cos(rad)
-    const y1 = cy + rTickInner * Math.sin(rad)
-    const x2 = cx + rTickOuter * Math.cos(rad)
-    const y2 = cy + rTickOuter * Math.sin(rad)
-    // Color ticks: outer thirds = red/green, middle third = gray.
-    const color =
-      deg <= -30 ? '#f05252' :
-      deg >=  30 ? '#00d4aa' :
-                   '#3a4458'
-    const w = deg % 30 === 0 ? 2.5 : 1.2  // major every 30°.
-    ticks.push({ x1, y1, x2, y2, color, w })
+  // X position for a candle by its global index (into `candles`, which is
+  // shared across visible + predicted). We map the global index onto the
+  // visible sub-window. Predicted bars use the same mapping (they extend
+  // past visible[last]).
+  const xForGlobalIndex = (gi: number): number | null => {
+    const localIdx = gi - tailStart
+    if (localIdx < 0) return null
+    return leftPad + localIdx * (candleWidth + gap)
   }
 
-  // Needle endpoints.
-  const needleTipX = cx + rNeedleTip * Math.cos(needleRad)
-  const needleTipY = cy + rNeedleTip * Math.sin(needleRad)
-  const needlePerpRad = needleRad + Math.PI / 2
-  const baseLeftX = cx + rNeedleBase * Math.cos(needlePerpRad)
-  const baseLeftY = cy + rNeedleBase * Math.sin(needlePerpRad)
-  const baseRightX = cx - rNeedleBase * Math.cos(needlePerpRad)
-  const baseRightY = cy - rNeedleBase * Math.sin(needlePerpRad)
+  const lastCandle = candles[candles.length - 1]
 
-  return (
-    <div className="card" style={{ padding: '20px 24px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
-        <span style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Trade analysis — next {horizonBars} × {interval} bar{horizonBars === 1 ? '' : 's'}
-        </span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ fontSize: 11, color: 'var(--fg-dim)' }}>Horizon</span>
-          {[1, 3, 5, 10, 20, 30].filter(h => h <= maxHorizon).map(h => (
-            <button
-              key={h}
-              className={selectedHorizon === h ? 'active' : ''}
-              onClick={() => setSelectedHorizon(h)}
-              style={{ fontSize: 11, padding: '2px 8px', height: 24 }}
-            >
-              {h}
-            </button>
-          ))}
-          <input
-            type="range"
-            min={1}
-            max={maxHorizon}
-            value={selectedHorizon}
-            onChange={e => setSelectedHorizon(parseInt(e.target.value, 10))}
-            style={{ width: 100, marginLeft: 4 }}
-            title={`Horizon: ${selectedHorizon}`}
-          />
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg)', minWidth: 24, textAlign: 'right' }}>
-            {selectedHorizon}
-          </span>
-        </div>
-      </div>
+  // Pin a random anchor that has enough context (so the predict call
+  // actually returns 200 from the backend).
+  const pinRandom = () => {
+    if (candles.length < 30) return
+    const minIdx = Math.max(0, Math.floor(candles.length * 0.2))
+    const maxIdx = Math.max(minIdx + 1, candles.length - 2)
+    const pick = minIdx + Math.floor(Math.random() * (maxIdx - minIdx))
+    setHoveredIndex(null)
+    setPinnedIndex(pick)
+  }
 
-      <div style={{ display: 'flex', justifyContent: 'center' }}>
-        <svg width={W} height={H} style={{ overflow: 'visible' }}>
-          {/* Background arc */}
-          <path d={arcPath} stroke="#1c2230" strokeWidth={20} fill="none" strokeLinecap="round" />
+  // ---- render ----------------------------------------------------------
+  const fmt = (n: number, d = 2) => n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d })
 
-          {/* Three colored zone arcs */}
-          {(() => {
-            // Sell zone: -90° to -30°. Hold: -30° to +30°. Buy: +30° to +90°.
-            const arc = (deg1: number, deg2: number, color: string) => {
-              const r1 = (deg1 - 90) * Math.PI / 180
-              const r2 = (deg2 - 90) * Math.PI / 180
-              const x1 = cx + rOuter * Math.cos(r1), y1 = cy + rOuter * Math.sin(r1)
-              const x2 = cx + rOuter * Math.cos(r2), y2 = cy + rOuter * Math.sin(r2)
-              return (
-                <path
-                  key={color}
-                  d={`M ${x1} ${y1} A ${rOuter} ${rOuter} 0 0 1 ${x2} ${y2}`}
-                  stroke={color}
-                  strokeWidth={6}
-                  fill="none"
-                  strokeLinecap="round"
-                  opacity={0.55}
-                />
-              )
-            }
-            return [
-              arc(-90, -30, '#f05252'),
-              arc(-30,  30, '#3a4458'),
-              arc( 30,  90, '#00d4aa'),
-            ]
-          })()}
-
-          {/* Tick marks */}
-          {ticks.map((t, i) => (
-            <line key={i} x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2} stroke={t.color} strokeWidth={t.w} strokeLinecap="round" />
-          ))}
-
-          {/* Needle */}
-          <g>
-            <polygon
-              points={`${baseLeftX},${baseLeftY} ${needleTipX},${needleTipY} ${baseRightX},${baseRightY}`}
-              fill={verb.color}
-              opacity={conf < 0.05 ? 0.5 : 0.95}
-            />
-            <circle cx={cx} cy={cy} r={10} fill="#0b0e13" stroke={verb.color} strokeWidth={2} />
-          </g>
-
-          {/* Side labels */}
-          <text x={cx - rOuter + 4} y={cy + 14} fill="#f05252" fontSize={12} fontWeight={600} fontFamily="var(--font-mono)">SELL</text>
-          <text x={cx + rOuter - 28} y={cy + 14} fill="#00d4aa" fontSize={12} fontWeight={600} fontFamily="var(--font-mono)">BUY</text>
-        </svg>
-      </div>
-
-      {/* Verb */}
-      <div style={{ textAlign: 'center', marginTop: 4 }}>
-        <div style={{
-          fontSize: 32,
-          fontWeight: 800,
-          color: verb.color,
-          letterSpacing: '0.04em',
-          fontFamily: 'var(--font-mono)',
-        }}>
-          {verb.label}
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginTop: 2 }}>{verb.sub}</div>
-      </div>
-
-      {/* Needle equation */}
-      <div
-        title={
-          'Needle is the standardized expected return, squashed to (-1, 1) by tanh, then mapped to ±90°. ' +
-          'It always points in the model\'s average direction even when the action verb is HOLD.'
-        }
-        style={{
-          textAlign: 'center', marginTop: 10,
-          fontFamily: 'var(--font-mono)', fontSize: 11,
-          color: 'var(--fg-dim)', lineHeight: 1.6,
-        }}
-      >
-        <div>
-          θ = tanh(Σ E[rᵢ] / σ_cum) · 90° = tanh(
-          <span style={{ color: 'var(--fg)' }}>{cumRet >= 0 ? '+' : ''}{(cumRet * 1e4).toFixed(2)} bps</span>
-          {' / '}
-          <span style={{ color: 'var(--fg)' }}>{(cumStd * 1e4).toFixed(2)} bps</span>
-          ) · 90°  <span style={{ color: 'var(--fg-dim)' }}>over {horizonBars} bars</span>
-        </div>
-        <div style={{ marginTop: 2 }}>
-          z = <span style={{ color: 'var(--fg)' }}>{zScore.toFixed(3)}</span>
-          {'   →   '}
-          θ = <span style={{ color: verb.color }}>{needleDeg >= 0 ? '+' : ''}{needleDeg.toFixed(1)}°</span>
-        </div>
-      </div>
-
-      {/* Confidence bar */}
-      <div style={{ marginTop: 18 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
-          <span>Confidence</span>
-          <span style={{ fontFamily: 'var(--font-mono)', color: confBucket.color }}>
-            {(conf * 100).toFixed(1)}% — {confBucket.label}
-          </span>
-        </div>
-        <div style={{ position: 'relative', height: 10, background: 'var(--bg-elevated)', borderRadius: 4, overflow: 'hidden' }}>
-          {/* Tick marks for low / moderate / high thresholds (15%, 30%, 55%). */}
-          <div style={{ position: 'absolute', left: '15%', top: 0, bottom: 0, width: 1, background: '#1c2230' }} />
-          <div style={{ position: 'absolute', left: '30%', top: 0, bottom: 0, width: 1, background: '#1c2230' }} />
-          <div style={{ position: 'absolute', left: '55%', top: 0, bottom: 0, width: 1, background: '#1c2230' }} />
-          <div style={{
-            position: 'absolute', left: 0, top: 0, bottom: 0,
-            width: `${Math.max(2, conf * 100)}%`,
-            background: confBucket.color,
-            transition: 'width 200ms',
-          }} />
-        </div>
-      </div>
-
-      {/* Per-horizon lean curve */}
-      {path.length > 1 && (
-        <div style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid #1c2230' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-            <span style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              Lean by horizon — z-score across all 1..{maxHorizon} bars
-            </span>
-            <span style={{ fontSize: 10, color: 'var(--fg-dim)' }}>click a bar to select that horizon</span>
-          </div>
-          <ZByHorizon
-            path={path}
-            selected={selectedHorizon}
-            onPick={setSelectedHorizon}
-          />
-        </div>
-      )}
-
-      {/* Quick stats row */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(4, 1fr)',
-        gap: 12,
-        marginTop: 18,
-        paddingTop: 14,
-        borderTop: '1px solid #1c2230',
-      }}>
-        <Stat label="P(Up) next" value={`${(p.p_up * 100).toFixed(1)}%`}  color="#00d4aa" />
-        <Stat label="P(Down) next" value={`${(p.p_down * 100).toFixed(1)}%`} color="#f05252" />
-        <Stat label={`Cumulative ${horizonBars}-bar`} value={ret2bps(cumRet)} color={cumRet > p.flat_eps ? '#00d4aa' : cumRet < -p.flat_eps ? '#f05252' : 'var(--fg-dim)'} />
-        <Stat label={`Target after ${horizonBars}`} value={fmtPrice(cumClose)} />
-      </div>
-    </div>
-  )
-}
-
-function Stat({ label, value, color }: { label: string, value: string, color?: string }) {
-  return (
-    <div style={{ textAlign: 'center' }}>
-      <div style={{ fontSize: 10, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
-      <div style={{ fontSize: 14, fontFamily: 'var(--font-mono)', color: color ?? 'var(--fg)', marginTop: 2 }}>{value}</div>
-    </div>
-  )
-}
-
-function ZByHorizon({
-  path,
-  selected,
-  onPick,
-}: {
-  path: PredictedPoint[]
-  selected: number
-  onPick: (h: number) => void
-}) {
-  const zs = path.map(p => p.cumulative_z ?? 0)
-  const maxAbs = Math.max(0.05, ...zs.map(z => Math.abs(z)))
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', height: 80, gap: 2, background: '#0e1620', border: '1px solid #1c2230', borderRadius: 4, padding: '8px 6px', position: 'relative' }}>
-        {/* Zero line */}
-        <div style={{ position: 'absolute', left: 6, right: 6, top: '50%', height: 1, background: '#3a4458' }} />
-        {path.map((pt, i) => {
-          const h = pt.horizon ?? i + 1
-          const z = pt.cumulative_z ?? 0
-          const heightPct = (Math.abs(z) / maxAbs) * 50  // 0..50% of the half
-          const isSel = h === selected
-          const color = z > 0 ? '#00d4aa' : z < 0 ? '#f05252' : '#8492a6'
-          return (
-            <div
-              key={i}
-              onClick={() => onPick(h)}
-              title={`H=${h} · z=${z.toFixed(3)} · ret=${pt.cumulative_ret_bps.toFixed(2)} bps`}
-              style={{
-                flex: 1,
-                height: '100%',
-                position: 'relative',
-                cursor: 'pointer',
-                opacity: isSel ? 1 : 0.85,
-              }}
-            >
-              <div style={{
-                position: 'absolute',
-                left: 0, right: 0,
-                ...(z >= 0
-                  ? { top: `calc(50% - ${heightPct}%)`, height: `${heightPct}%` }
-                  : { top: '50%', height: `${heightPct}%` }),
-                background: color,
-                borderRadius: 2,
-                outline: isSel ? '2px solid #fff' : 'none',
-              }} />
+      <style>{STYLE}</style>
+      <span className="tcp-fonts">.</span>
+      <div className="tcp-root">
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 28, flexWrap: 'wrap', gap: 16 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+              <span className="tcp-status-dot" />
+              <span style={{ fontSize: 10, letterSpacing: '0.2em', color: '#71717a', textTransform: 'uppercase' }}>
+                Live BTC/USDT · model run via /predict
+              </span>
             </div>
-          )
-        })}
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--fg-dim)', marginTop: 4 }}>
-        <span>H=1</span>
-        <span style={{ color: 'var(--fg)' }}>H={selected}: z={(path[selected - 1]?.cumulative_z ?? 0).toFixed(3)}</span>
-        <span>H={path.length}</span>
+            <h1 className="tcp-display" style={{ fontSize: 56, fontWeight: 600, lineHeight: 1, margin: 0 }}>
+              Tokenized Candle <span style={{ fontStyle: 'italic', color: 'rgba(125, 211, 252, 0.9)' }}>Predictor</span>
+            </h1>
+            <p style={{ fontSize: 14, color: '#71717a', marginTop: 12, maxWidth: 560 }}>
+              Hover any candle to project the next {HORIZON} bars from that point. Click to pin. Prediction comes from the trained CandleGPTv2 model anchored at the chosen bar.
+            </p>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-end' }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <span className="tcp-pill" style={{ color: '#7dd3fc' }}>{interval} · OHLCV</span>
+              <span className="tcp-pill">N = {candles.length}</span>
+              <span className="tcp-pill">Horizon {HORIZON}</span>
+            </div>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {(['1m', '5m', '15m', '1h', '4h', '1d'] as const).map((tf) => (
+                <button
+                  key={tf}
+                  className={`tcp-pill btn ${interval === tf ? 'active' : ''}`}
+                  onClick={() => { setIntervalTf(tf); setHoveredIndex(null); setPinnedIndex(null) }}
+                  style={{ fontFamily: 'inherit' }}
+                >
+                  {tf}
+                </button>
+              ))}
+            </div>
+            {error && <span style={{ color: '#fb7185', fontSize: 11 }}>{error}</span>}
+            {loading && <span style={{ color: '#71717a', fontSize: 11 }}>loading…</span>}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 20 }}>
+          {/* Chart panel */}
+          <div className="tcp-panel" style={{ padding: 20 }}>
+            <ChartHeader
+              candles={candles}
+              lastCandle={lastCandle}
+            />
+            <div style={{ overflowX: 'auto', overflowY: 'hidden', borderRadius: 14, position: 'relative' }}>
+              <svg
+                width={chartWidth}
+                height={chartHeight}
+                style={{ display: 'block', userSelect: 'none' }}
+                onMouseLeave={() => setHoveredIndex(null)}
+              >
+                <defs>
+                  <linearGradient id="tcp-pred-gradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#7dd3fc" stopOpacity="0.4" />
+                    <stop offset="100%" stopColor="#7dd3fc" stopOpacity="0" />
+                  </linearGradient>
+                  <linearGradient id="tcp-up" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#4ade80" />
+                    <stop offset="100%" stopColor="#22c55e" />
+                  </linearGradient>
+                  <linearGradient id="tcp-down" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#fb7185" />
+                    <stop offset="100%" stopColor="#e11d48" />
+                  </linearGradient>
+                </defs>
+
+                {ticks.map((t, idx) => (
+                  <g key={idx}>
+                    <line x1={leftPad} x2={chartWidth - rightPad + 16} y1={y(t)} y2={y(t)}
+                          stroke="rgba(255,255,255,0.04)" strokeWidth={1} />
+                    <text className="tcp-tick" x={chartWidth - rightPad + 4} y={y(t) + 3}>
+                      {t.toLocaleString(undefined, { maximumFractionDigits: 1 })}
+                    </text>
+                  </g>
+                ))}
+
+                {/* Crosshair at the active anchor */}
+                {activeIndex != null && (() => {
+                  const x = xForGlobalIndex(activeIndex)
+                  if (x == null) return null
+                  return (
+                    <line x1={x + candleWidth / 2} x2={x + candleWidth / 2}
+                          y1={16} y2={chartHeight - 16}
+                          stroke="#fbbf24" strokeWidth={1} className="tcp-cursor-line" />
+                  )
+                })()}
+
+                {/* Real candles + hit areas */}
+                {visible.map((c) => {
+                  const x = xForGlobalIndex(c.i ?? 0)
+                  if (x == null) return null
+                  const up = c.close >= c.open
+                  const isActive = c.i === activeIndex
+                  const isFaded = activeIndex != null && (c.i ?? 0) > activeIndex
+                  return (
+                    <g
+                      key={c.i}
+                      onMouseEnter={() => setHoveredIndex(c.i ?? null)}
+                      onClick={() => setPinnedIndex(c.i ?? null)}
+                      style={{ cursor: 'crosshair' }}
+                    >
+                      <rect x={x - gap / 2} y={0} width={candleWidth + gap} height={chartHeight} fill="transparent" />
+                      <g opacity={isFaded ? 0.25 : 1} style={{ transition: 'opacity 200ms' }}>
+                        <line x1={x + candleWidth / 2} x2={x + candleWidth / 2}
+                              y1={y(c.high)} y2={y(c.low)}
+                              stroke={up ? '#4ade80' : '#fb7185'} strokeWidth={1} />
+                        <rect x={x}
+                              y={Math.min(y(c.open), y(c.close))}
+                              width={candleWidth}
+                              height={Math.max(1.5, Math.abs(y(c.open) - y(c.close)))}
+                              rx={0.5}
+                              fill={up ? 'url(#tcp-up)' : 'url(#tcp-down)'} />
+                      </g>
+                      {isActive && (
+                        <>
+                          <circle cx={x + candleWidth / 2} cy={y(c.close)} r={5} fill="none" stroke="#fbbf24" strokeWidth={1.5} />
+                          <circle cx={x + candleWidth / 2} cy={y(c.close)} r={2} fill="#fbbf24" />
+                        </>
+                      )}
+                    </g>
+                  )
+                })}
+
+                {/* Predicted candles */}
+                {predictedCandles.length > 0 && activeIndex != null && predictedCandles.map((p, stepIdx) => {
+                  const globalIdx = activeIndex + 1 + stepIdx
+                  const x = xForGlobalIndex(globalIdx)
+                  if (x == null) return null
+                  const px = x + 1.5
+                  return (
+                    <g key={`pred-${stepIdx}`} className="tcp-pred-candle" style={{ animationDelay: `${stepIdx * 14}ms` }}>
+                      <line x1={px + (candleWidth - 3) / 2} x2={px + (candleWidth - 3) / 2}
+                            y1={y(p.high)} y2={y(p.low)}
+                            stroke="#7dd3fc" strokeWidth={1.5} strokeDasharray="2 2" />
+                      <rect x={px}
+                            y={Math.min(y(p.open), y(p.close))}
+                            width={candleWidth - 3}
+                            height={Math.max(1.5, Math.abs(y(p.open) - y(p.close)))}
+                            rx={0.5}
+                            fill="rgba(125, 211, 252, 0.3)"
+                            stroke="#7dd3fc"
+                            strokeWidth={1} />
+                    </g>
+                  )
+                })}
+
+                {/* Trend line through predicted closes */}
+                {predictedCandles.length > 0 && activeIndex != null && (() => {
+                  const anchorX = xForGlobalIndex(activeIndex)
+                  if (anchorX == null) return null
+                  const anchorY = y(candles[activeIndex].close)
+                  const pts: Array<[number, number]> = [[anchorX + candleWidth / 2, anchorY]]
+                  predictedCandles.forEach((p, idx) => {
+                    const gx = xForGlobalIndex(activeIndex + 1 + idx)
+                    if (gx == null) return
+                    pts.push([gx + 1.5 + (candleWidth - 3) / 2, y(p.close)])
+                  })
+                  const d = pts.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt[0]} ${pt[1]}`).join(' ')
+                  return <path d={d} fill="none" stroke="#7dd3fc" strokeWidth={1} opacity={0.6} className="tcp-pred-line" />
+                })()}
+              </svg>
+            </div>
+
+            {activeIndex == null ? (
+              <div className="tcp-empty-hint" style={{ textAlign: 'center', fontSize: 11, color: '#71717a', marginTop: 12, letterSpacing: '0.15em', textTransform: 'uppercase' }}>
+                ↑ Hover over a candle to project ↑
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', fontSize: 11, color: '#52525b', marginTop: 12, letterSpacing: '0.15em', textTransform: 'uppercase' }}>
+                {pendingAnchor === activeIndex
+                  ? 'fetching prediction…'
+                  : pinnedIndex === activeIndex
+                    ? `Pinned anchor: bar #${activeIndex} · ${activeCandle ? new Date(activeCandle.time * 1000).toISOString().slice(11, 16) + ' UTC' : ''}`
+                    : `Anchor: bar #${activeIndex} · click to pin`}
+              </div>
+            )}
+          </div>
+
+          {/* Side panel */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {/* Forecast */}
+            <div className="tcp-panel" style={{ padding: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <span style={{ fontSize: 10, letterSpacing: '0.2em', color: '#71717a', textTransform: 'uppercase' }}>Forecast</span>
+                <span className="tcp-pill" style={{ fontSize: 9 }}>+{HORIZON} bars</span>
+              </div>
+              {activeCandle && activePrediction ? (
+                <>
+                  <div className="tcp-display" style={{ fontSize: 52, fontWeight: 600, lineHeight: 1, marginBottom: 4 }}>
+                    <span style={{ color: forecastDelta >= 0 ? '#34d399' : '#fb7185' }}>
+                      {forecastDelta >= 0 ? '+' : ''}{forecastPct.toFixed(2)}
+                    </span>
+                    <span style={{ color: '#52525b', fontSize: 22, marginLeft: 4 }}>%</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#71717a', marginBottom: 16 }}>
+                    {fmt(activeCandle.close)} → {fmt(predictedCandles[predictedCandles.length - 1]?.close ?? activeCandle.close)}
+                    <span style={{ marginLeft: 8, color: '#52525b' }}>
+                      conf {(activePrediction.confidence * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                  <div className="tcp-divider" style={{ marginBottom: 16 }} />
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <Metric label="Direction"
+                            value={metrics ? `${(metrics.directionAccuracy * 100).toFixed(0)}%` : '—'}
+                            meter={metrics?.directionAccuracy} />
+                    <Metric label="Close MAE" value={metrics ? `$${fmt(metrics.closeMae)}` : '—'} />
+                    <Metric label="% Error" value={metrics ? `${(metrics.avgPctError * 100).toFixed(2)}%` : '—'} />
+                    <Metric label="Coverage" value={metrics ? `${metrics.count}/${HORIZON}` : '—'} />
+                  </div>
+                </>
+              ) : activeCandle && pendingAnchor === activeIndex ? (
+                <div style={{ color: '#52525b', fontSize: 13, padding: '24px 0', textAlign: 'center' }}>fetching…</div>
+              ) : activeCandle ? (
+                <div style={{ color: '#52525b', fontSize: 13, padding: '24px 0', textAlign: 'center' }}>
+                  prediction unavailable for this anchor
+                </div>
+              ) : (
+                <div style={{ color: '#52525b', fontSize: 13, padding: '24px 0', textAlign: 'center' }}>
+                  No anchor selected
+                </div>
+              )}
+            </div>
+
+            {/* Token breakdown */}
+            <div className="tcp-panel" style={{ padding: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                <span style={{ fontSize: 10, letterSpacing: '0.2em', color: '#71717a', textTransform: 'uppercase' }}>Token</span>
+                {activeIndex != null && <span style={{ fontSize: 10, color: '#52525b' }}>#{activeIndex}</span>}
+              </div>
+              {activeToken ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12 }}>
+                  <TokenRow k="direction" v={activeToken.direction}
+                            highlight={activeToken.direction === 'UP' ? 'emerald' : activeToken.direction === 'DOWN' ? 'rose' : null} />
+                  <TokenRow k="body" v={activeToken.body} />
+                  <TokenRow k="range" v={activeToken.range} />
+                  <TokenRow k="upper" v={activeToken.upper.replace('_', ' ').toLowerCase()} />
+                  <TokenRow k="lower" v={activeToken.lower.replace('_', ' ').toLowerCase()} />
+                </div>
+              ) : (
+                <div style={{ color: '#52525b', fontSize: 12, padding: '12px 0', textAlign: 'center' }}>—</div>
+              )}
+            </div>
+
+            <button className="tcp-pin-btn" onClick={pinRandom}>↳ Pin random anchor</button>
+            {pinnedIndex != null && (
+              <button
+                onClick={() => { setPinnedIndex(null); setHoveredIndex(null) }}
+                style={{
+                  background: 'transparent', border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: 12, padding: '8px 12px', color: '#a1a1aa', fontSize: 11,
+                  letterSpacing: '0.1em', textTransform: 'uppercase', cursor: 'pointer',
+                  fontFamily: 'inherit',
+                }}
+              >
+                clear pin
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   )
 }
 
-function ProbHistogram({ probs, centers, flatEps }: { probs: number[], centers: number[], flatEps: number }) {
-  const max = Math.max(...probs)
+function ChartHeader({ candles, lastCandle }: { candles: Candle[]; lastCandle: Candle | undefined }) {
+  const high = useMemo(() => candles.reduce((m, c) => Math.max(m, c.high), -Infinity), [candles])
+  const low = useMemo(() => candles.reduce((m, c) => Math.min(m, c.low), Infinity), [candles])
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 0, height: 60, background: 'var(--bg-elevated)', borderRadius: 4, padding: 4 }}>
-      {probs.map((pr, i) => {
-        const c = centers[i]
-        const color = c > flatEps ? '#00d4aa' : c < -flatEps ? '#f05252' : '#8492a6'
-        const h = max > 0 ? (pr / max) * 100 : 0
-        return (
-          <div
-            key={i}
-            title={`bin ${i}: return ${(c * 100).toFixed(3)}% · prob ${(pr * 100).toFixed(2)}%`}
-            style={{
-              flex: 1,
-              height: `${h}%`,
-              background: color,
-              minHeight: pr > 0 ? 1 : 0,
-              opacity: 0.85,
-            }}
-          />
-        )
-      })}
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, padding: '0 4px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
+        <Stat label="Last" value={lastCandle ? lastCandle.close.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'} accent />
+        <Stat label="High" value={Number.isFinite(high) ? high.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'} />
+        <Stat label="Low" value={Number.isFinite(low) ? low.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'} />
+        <Stat label="Bars" value={String(candles.length)} />
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, fontSize: 10, letterSpacing: '0.15em', color: '#71717a', textTransform: 'uppercase' }}>
+        <LegendDot color="#34d399" label="Up" />
+        <LegendDot color="#fb7185" label="Down" />
+        <LegendDot color="#7dd3fc" label="Predicted" dashed />
+      </div>
+    </div>
+  )
+}
+
+function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+      <span style={{ fontSize: 9, letterSpacing: '0.15em', color: '#52525b', textTransform: 'uppercase' }}>{label}</span>
+      <span className="tcp-display" style={{ fontSize: 16, fontWeight: 600, color: accent ? '#7dd3fc' : '#e4e4e7' }}>{value}</span>
+    </div>
+  )
+}
+
+function LegendDot({ color, label, dashed }: { color: string; label: string; dashed?: boolean }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <span style={{
+        width: 10, height: 4, borderRadius: 1,
+        background: dashed ? 'transparent' : color,
+        border: dashed ? `1px dashed ${color}` : 'none',
+      }} />
+      {label}
+    </span>
+  )
+}
+
+function Metric({ label, value, meter }: { label: string; value: string; meter?: number }) {
+  return (
+    <div>
+      <div style={{ fontSize: 9, letterSpacing: '0.15em', color: '#52525b', textTransform: 'uppercase', marginBottom: 4 }}>{label}</div>
+      <div className="tcp-display" style={{ fontSize: 20, fontWeight: 600, color: '#f4f4f5', marginBottom: 6 }}>{value}</div>
+      {meter != null && (
+        <div className="tcp-meter-bg">
+          <div className="tcp-meter-fill" style={{ width: `${Math.max(0, Math.min(1, meter)) * 100}%` }} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TokenRow({ k, v, highlight }: { k: string; v: string; highlight?: 'emerald' | 'rose' | null }) {
+  const colorMap: Record<string, string> = { emerald: '#4ade80', rose: '#fb7185' }
+  const style: CSSProperties = { color: highlight ? colorMap[highlight] : '#e8e6e1', fontWeight: 600 }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+      <span style={{ color: '#71717a' }}>{k}</span>
+      <span style={style}>{v}</span>
     </div>
   )
 }

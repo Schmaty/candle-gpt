@@ -64,6 +64,29 @@ export async function getEvalHistory(runId?: string) {
   if (!r.ok) throw new Error(`eval_history: ${r.status}`)
   return r.json()
 }
+export async function fetchPredictAtAnchor(opts: {
+  anchorTime: number
+  interval: string
+  horizon: number
+}) {
+  const params = new URLSearchParams({
+    anchor_time: String(opts.anchorTime),
+    interval: opts.interval,
+    horizon: String(opts.horizon),
+  })
+  const r = await fetch(`${BASE}/predict?${params}`)
+  if (!r.ok) {
+    let msg = `predict: ${r.status}`
+    try { const j = await r.json(); if (j.detail) msg = `${msg} — ${j.detail}` } catch {}
+    throw new Error(msg)
+  }
+  return r.json() as Promise<{
+    interval: string
+    anchor_time: number
+    prediction: any
+  }>
+}
+
 export async function runBacktest(opts: {
   temperature: number; horizon: number; z_threshold: number;
   start_frac?: number; end_frac?: number; fee_bps?: number;
