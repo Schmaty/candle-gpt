@@ -25,8 +25,11 @@ v2/runs_dead/
 *.ckpt
 v2/current_run_id.txt
 
-# Local/generated artifacts
-data/*.parquet
+# Local/generated artifacts and legacy prototype folders
+/data/
+/model/
+/server/
+/web/
 
 # Notebooks
 .ipynb_checkpoints/
