@@ -75,6 +75,12 @@ class TrainConfig:
     loss_type: str = "ce"
     soft_label_sigma_bins: float = 2.0
 
+    # --- Auxiliary training losses ---
+    # These attach temporary heads during training only. The saved/inference
+    # CandleGPT model still exposes the same n_bins logits as its public output.
+    aux_return_loss_weight: float = 0.0
+    aux_direction_loss_weight: float = 0.0
+
     # --- Tokenizer ---
     n_bins: int = 256
 

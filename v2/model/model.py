@@ -5,6 +5,8 @@ Output: (batch, seq_len, n_bins=256) float32 logits
 """
 from __future__ import annotations
 
+from typing import overload, Literal
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -35,7 +37,18 @@ class CandleGPTv2(nn.Module):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    @overload
+    def forward(self, x: torch.Tensor, *, return_hidden: Literal[False] = False) -> torch.Tensor: ...
+
+    @overload
+    def forward(self, x: torch.Tensor, *, return_hidden: Literal[True]) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        return_hidden: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         B, T, _ = x.shape
         if T > self.cfg.block_size:
             raise ValueError(
@@ -46,7 +59,10 @@ class CandleGPTv2(nn.Module):
         for block in self.blocks:
             h = block(h)
         h = self.ln_f(h)
-        return self.head(h)
+        logits = self.head(h)
+        if return_hidden:
+            return logits, h
+        return logits
 
     def num_params(self, exclude_pos_embed: bool = False) -> int:
         total = sum(p.numel() for p in self.parameters())

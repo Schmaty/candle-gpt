@@ -42,6 +42,10 @@ def main() -> None:
                     help="Training loss: hard CE or ordinal Gaussian-smoothed soft CE.")
     ap.add_argument("--soft-label-sigma-bins", type=float, default=2.0,
                     help="Gaussian soft-label width in return-bin units for --loss-type soft_ce.")
+    ap.add_argument("--aux-return-loss-weight", type=float, default=0.0,
+                    help="Weight for training-only final-hidden-state return Huber loss.")
+    ap.add_argument("--aux-direction-loss-weight", type=float, default=0.0,
+                    help="Weight for training-only final-hidden-state direction BCE loss.")
     args = ap.parse_args()
 
     cfg = TrainConfig(
@@ -54,6 +58,8 @@ def main() -> None:
         interval=args.interval,
         loss_type=args.loss_type,
         soft_label_sigma_bins=args.soft_label_sigma_bins,
+        aux_return_loss_weight=args.aux_return_loss_weight,
+        aux_direction_loss_weight=args.aux_direction_loss_weight,
     )
     if args.stride_train is not None:
         cfg.stride_train = args.stride_train

@@ -46,21 +46,22 @@ def _save_checkpoint(
     val_loss: Optional[float],
     cfg: TrainConfig,
     tag: str,
+    aux_heads: nn.ModuleDict | None = None,
 ) -> Path:
     cfg.ckpt_dir.mkdir(parents=True, exist_ok=True)
     path = cfg.ckpt_dir / f"{tag}.pt"
-    torch.save(
-        {
-            "step": step,
-            "val_loss": val_loss,
-            "model_state": model.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
-            "model_config": cfg.model.to_dict(),
-            "run_id": cfg.run_id,
-            "tokenizer_path": str(cfg.tokenizer_path),
-        },
-        path,
-    )
+    payload = {
+        "step": step,
+        "val_loss": val_loss,
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "model_config": cfg.model.to_dict(),
+        "run_id": cfg.run_id,
+        "tokenizer_path": str(cfg.tokenizer_path),
+    }
+    if aux_heads is not None:
+        payload["aux_heads_state"] = aux_heads.state_dict()
+    torch.save(payload, path)
     val_loss_str = f"{val_loss:.4f}" if val_loss is not None else "None"
     log.info(f"Checkpoint saved: {path}  (step={step}, val_loss={val_loss_str})")
     return path
@@ -145,6 +146,22 @@ def _fit_tokenizer(cfg: TrainConfig, train_subset, full_ds) -> ReturnTokenizerV2
     return tok
 
 
+def _build_aux_heads(cfg: TrainConfig, device: torch.device) -> nn.ModuleDict | None:
+    """Create training-only auxiliary heads when requested.
+
+    These heads are optimized alongside the transformer but are not part of the
+    public inference output. The checkpoint stores them only for resume support.
+    """
+    if cfg.aux_return_loss_weight <= 0 and cfg.aux_direction_loss_weight <= 0:
+        return None
+    heads = nn.ModuleDict()
+    if cfg.aux_return_loss_weight > 0:
+        heads["return"] = nn.Linear(cfg.model.d_model, 1)
+    if cfg.aux_direction_loss_weight > 0:
+        heads["direction"] = nn.Linear(cfg.model.d_model, 1)
+    return heads.to(device)
+
+
 def _collate(batch, tokenizer: ReturnTokenizerV2, device: torch.device):
     # batch is the DataLoader-collated result: (feats_batch, rets_batch)
     # feats_batch: (B, T, F), rets_batch: (B, T)
@@ -207,9 +224,23 @@ def train(cfg: TrainConfig) -> str:
     log.info(f"Split — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
 
     tokenizer = _fit_tokenizer(cfg, train_ds, full_ds)
+    token_centers = torch.as_tensor(
+        tokenizer.decode(np.arange(tokenizer.n_bins)),
+        dtype=torch.float32,
+        device=device,
+    )
 
     model = CandleGPTv2(cfg.model).to(device)
     log.info(f"Model params: {model.num_params():,}")
+    aux_heads = _build_aux_heads(cfg, device)
+    if aux_heads is not None:
+        n_aux_params = sum(p.numel() for p in aux_heads.parameters())
+        log.info(
+            "Auxiliary training heads enabled: "
+            f"return_weight={cfg.aux_return_loss_weight} "
+            f"direction_weight={cfg.aux_direction_loss_weight} "
+            f"params={n_aux_params:,}"
+        )
 
     # Build emitter
     hw = ProgressEmitter.collect_hardware()
@@ -230,8 +261,11 @@ def train(cfg: TrainConfig) -> str:
     )
     emitter.update(step=0, state="starting", lr=cfg.lr_max, force=True)
 
+    opt_params = list(model.parameters())
+    if aux_heads is not None:
+        opt_params += list(aux_heads.parameters())
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        opt_params,
         lr=cfg.lr_max,
         betas=(cfg.beta1, cfg.beta2),
         weight_decay=cfg.weight_decay,
@@ -242,6 +276,8 @@ def train(cfg: TrainConfig) -> str:
     if cfg.resume_from is not None:
         ckpt = torch.load(cfg.resume_from, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
+        if aux_heads is not None and "aux_heads_state" in ckpt:
+            aux_heads.load_state_dict(ckpt["aux_heads_state"])
         if "optimizer_state" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer_state"])
         resume_step = int(ckpt.get("step", 0))
@@ -283,7 +319,7 @@ def train(cfg: TrainConfig) -> str:
                 if cfg.max_wall_clock_s > 0 and math.isfinite(cfg.max_wall_clock_s) and elapsed >= cfg.max_wall_clock_s:
                     log.info(f"[STOP] wall-clock cap at step {step} ({elapsed/3600:.2f}h)")
                     tag = f"step_{step:07d}"
-                    ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss if has_validated else None, cfg, tag)
+                    ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss if has_validated else None, cfg, tag, aux_heads)
                     flush_loss = float(np.mean(recent_losses)) if recent_losses else None
                     emitter.update(step=step, state="done",
                                    train_loss=flush_loss,
@@ -302,7 +338,11 @@ def train(cfg: TrainConfig) -> str:
 
                 step_start = time.time()
                 feats, ids = _collate(batch, tokenizer, device)
-                logits = model(feats)
+                if aux_heads is not None:
+                    logits, hidden = model(feats, return_hidden=True)
+                else:
+                    logits = model(feats)
+                    hidden = None
                 B, T, V = logits.shape
                 if cfg.forecast_only_loss:
                     # One supervised forecast per sampled window: use all
@@ -314,6 +354,20 @@ def train(cfg: TrainConfig) -> str:
                         loss_type=cfg.loss_type,
                         soft_label_sigma_bins=cfg.soft_label_sigma_bins,
                     )
+                    if aux_heads is not None:
+                        final_hidden = hidden[:, -1, :]
+                        target_ret = token_centers[ids[:, -1]]
+                        if cfg.aux_return_loss_weight > 0 and "return" in aux_heads:
+                            pred_ret = aux_heads["return"](final_hidden).squeeze(-1)
+                            ret_loss = nn.functional.huber_loss(pred_ret, target_ret, delta=0.001)
+                            loss = loss + cfg.aux_return_loss_weight * ret_loss
+                        if cfg.aux_direction_loss_weight > 0 and "direction" in aux_heads:
+                            direction_target = (target_ret > 0).to(torch.float32)
+                            direction_logits = aux_heads["direction"](final_hidden).squeeze(-1)
+                            dir_loss = nn.functional.binary_cross_entropy_with_logits(
+                                direction_logits, direction_target,
+                            )
+                            loss = loss + cfg.aux_direction_loss_weight * dir_loss
                 else:
                     # Legacy sequence loss: valid for ablations only. The last
                     # position is now safe because clean split construction
@@ -324,9 +378,26 @@ def train(cfg: TrainConfig) -> str:
                         loss_type=cfg.loss_type,
                         soft_label_sigma_bins=cfg.soft_label_sigma_bins,
                     )
+                    if aux_heads is not None:
+                        flat_hidden = hidden.reshape(B * T, -1)
+                        flat_target_ret = token_centers[ids.reshape(B * T)]
+                        if cfg.aux_return_loss_weight > 0 and "return" in aux_heads:
+                            pred_ret = aux_heads["return"](flat_hidden).squeeze(-1)
+                            ret_loss = nn.functional.huber_loss(pred_ret, flat_target_ret, delta=0.001)
+                            loss = loss + cfg.aux_return_loss_weight * ret_loss
+                        if cfg.aux_direction_loss_weight > 0 and "direction" in aux_heads:
+                            direction_target = (flat_target_ret > 0).to(torch.float32)
+                            direction_logits = aux_heads["direction"](flat_hidden).squeeze(-1)
+                            dir_loss = nn.functional.binary_cross_entropy_with_logits(
+                                direction_logits, direction_target,
+                            )
+                            loss = loss + cfg.aux_direction_loss_weight * dir_loss
                 optimizer.zero_grad()
                 loss.backward()
-                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip).item()
+                clip_params = list(model.parameters())
+                if aux_heads is not None:
+                    clip_params += list(aux_heads.parameters())
+                grad_norm = nn.utils.clip_grad_norm_(clip_params, cfg.grad_clip).item()
                 optimizer.step()
 
                 step_dt = time.time() - step_start
@@ -373,7 +444,7 @@ def train(cfg: TrainConfig) -> str:
                         best_val_loss = val_loss
                         plateau_evals = 0
                         best_ckpt_path = _save_checkpoint(
-                            model, optimizer, step, val_loss, cfg, "best_val"
+                            model, optimizer, step, val_loss, cfg, "best_val", aux_heads
                         )
                         log.info(f"  [val] NEW BEST: {val_loss:.4f}")
                     elif cfg.early_stop_patience_evals is not None:
@@ -388,7 +459,7 @@ def train(cfg: TrainConfig) -> str:
                                 f"patience={cfg.early_stop_patience_evals} min_delta={cfg.early_stop_min_delta}"
                             )
                             tag = f"step_{step:07d}"
-                            ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss if has_validated else None, cfg, tag)
+                            ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss if has_validated else None, cfg, tag, aux_heads)
                             emitter.update(step=step, state="done", last_checkpoint_step=step, force=True)
                             emitter.event("checkpoint", {"step": step, "path": str(ckpt_path)})
                             return cfg.run_id
@@ -399,7 +470,7 @@ def train(cfg: TrainConfig) -> str:
                     tag = f"step_{step:07d}"
                     emitter.update(step=step, state="checkpointing",
                                    last_checkpoint_step=step, force=True)
-                    ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss if has_validated else None, cfg, tag)
+                    ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss if has_validated else None, cfg, tag, aux_heads)
                     emitter.event("checkpoint", {"step": step, "path": str(ckpt_path)})
                     last_checkpoint_step = step
                     last_ckpt_time = now
