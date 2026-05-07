@@ -67,6 +67,14 @@ class TrainConfig:
     # heavily-overlapping timesteps inside the context window.
     forecast_only_loss: bool = True
 
+    # --- Loss ---
+    # "ce" keeps the old hard-label cross entropy. "soft_ce" keeps the exact
+    # same model output shape (n_bins logits), but trains against a Gaussian
+    # distribution around the true ordinal return bin so near misses are less
+    # wrong than far misses.
+    loss_type: str = "ce"
+    soft_label_sigma_bins: float = 2.0
+
     # --- Tokenizer ---
     n_bins: int = 256
 

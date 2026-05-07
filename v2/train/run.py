@@ -38,6 +38,10 @@ def main() -> None:
                     help="Minimum val-loss improvement counted for plateau stopping.")
     ap.add_argument("--max-wall-clock-h", type=float, default=None,
                     help="Override wall-clock cap in hours; 0 disables wall-clock stopping.")
+    ap.add_argument("--loss-type", choices=["ce", "soft_ce"], default="ce",
+                    help="Training loss: hard CE or ordinal Gaussian-smoothed soft CE.")
+    ap.add_argument("--soft-label-sigma-bins", type=float, default=2.0,
+                    help="Gaussian soft-label width in return-bin units for --loss-type soft_ce.")
     args = ap.parse_args()
 
     cfg = TrainConfig(
@@ -48,6 +52,8 @@ def main() -> None:
         lr_max=args.lr_max,
         window=args.window,
         interval=args.interval,
+        loss_type=args.loss_type,
+        soft_label_sigma_bins=args.soft_label_sigma_bins,
     )
     if args.stride_train is not None:
         cfg.stride_train = args.stride_train

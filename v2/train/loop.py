@@ -15,6 +15,7 @@ from v2.data.dataset import KlineWindowDataset
 from v2.model.model import CandleGPTv2
 from v2.model.tokenizer import ReturnTokenizerV2
 from v2.train.config import TrainConfig
+from v2.train.losses import candle_loss
 from v2.train.progress import HardwareSpecs, ModelSpecs, ProgressEmitter
 
 log = logging.getLogger(__name__)
@@ -176,8 +177,8 @@ def _eval_loss(
         feats, ids = _collate(batch, tokenizer, device)
         logits = model(feats)
         B, T, V = logits.shape
-        # Validation mirrors the training objective: one clean next-bar
-        # forecast per window, scored at the final context position.
+        # Validation stays hard-label CE so runs remain comparable even when
+        # training uses soft ordinal labels.
         loss = nn.functional.cross_entropy(logits[:, -1, :], ids[:, -1])
         losses.append(loss.item())
     model.train()
@@ -308,14 +309,20 @@ def train(cfg: TrainConfig) -> str:
                     # context up to the final bar to predict that bar's next
                     # return. This avoids rewarding the model for repeatedly
                     # reconstructing the same overlapping historical labels.
-                    loss = nn.functional.cross_entropy(logits[:, -1, :], ids[:, -1])
+                    loss = candle_loss(
+                        logits[:, -1, :], ids[:, -1],
+                        loss_type=cfg.loss_type,
+                        soft_label_sigma_bins=cfg.soft_label_sigma_bins,
+                    )
                 else:
                     # Legacy sequence loss: valid for ablations only. The last
                     # position is now safe because clean split construction
                     # excludes the file-level sentinel target.
-                    loss = nn.functional.cross_entropy(
+                    loss = candle_loss(
                         logits.view(B * T, V),
                         ids.view(B * T),
+                        loss_type=cfg.loss_type,
+                        soft_label_sigma_bins=cfg.soft_label_sigma_bins,
                     )
                 optimizer.zero_grad()
                 loss.backward()
