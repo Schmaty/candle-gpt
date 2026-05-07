@@ -31,6 +31,8 @@ def _select_device() -> torch.device:
 def _get_lr(step: int, cfg: TrainConfig) -> float:
     if step < cfg.warmup_steps:
         return cfg.lr_max * step / max(cfg.warmup_steps, 1)
+    if cfg.max_steps <= 0:
+        return cfg.lr_max
     progress = (step - cfg.warmup_steps) / max(cfg.max_steps - cfg.warmup_steps, 1)
     cosine_decay = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
     return cfg.lr_min + cosine_decay * (cfg.lr_max - cfg.lr_min)
@@ -79,15 +81,46 @@ def _build_datasets(cfg: TrainConfig):
     train_end_bar = int(n_bars * cfg.train_frac)
     val_end_bar = int(n_bars * (cfg.train_frac + cfg.val_frac))
 
-    def bar_to_window_idx(bar: int) -> int:
-        return max(0, bar - cfg.window + 1)
+    # Clean forecast splits: a dataset index is a window start. The supervised
+    # target for that window is the final timestep's next return, whose bar
+    # index is start + window - 1. Build subsets by target-bar ranges so no
+    # train loss is computed on val/test-era labels. Also leave a configurable
+    # gap around boundaries to make leakage/near-boundary overlap harder.
+    gap = cfg.window if cfg.split_gap_bars is None else max(0, cfg.split_gap_bars)
+    last_valid_target = n_bars - 2  # log_returns[-1] is sentinel 0.0; never train on it
 
-    train_end_win = bar_to_window_idx(train_end_bar)
-    val_end_win = bar_to_window_idx(val_end_bar)
+    def target_to_window_idx(target_bar: int) -> int:
+        return target_bar - cfg.window + 1
 
-    train_indices = list(range(0, train_end_win, cfg.stride_train))
-    val_indices = list(range(train_end_win, val_end_win, cfg.stride_val))
-    test_indices = list(range(val_end_win, n, cfg.stride_val))
+    def target_range_to_window_indices(start_target: int, end_target: int, stride: int) -> list[int]:
+        lo = max(cfg.window - 1, start_target)
+        hi = min(last_valid_target + 1, end_target)
+        if hi <= lo:
+            return []
+        return [target_to_window_idx(t) for t in range(lo, hi, stride)]
+
+    train_indices = target_range_to_window_indices(
+        cfg.window - 1,
+        train_end_bar - gap,
+        cfg.stride_train,
+    )
+    val_indices = target_range_to_window_indices(
+        train_end_bar + gap,
+        val_end_bar - gap,
+        cfg.stride_val,
+    )
+    test_indices = target_range_to_window_indices(
+        val_end_bar + gap,
+        last_valid_target + 1,
+        cfg.stride_val,
+    )
+
+    if not train_indices or not val_indices:
+        raise ValueError(
+            "Empty train/val split after applying clean target boundaries; "
+            f"n_bars={n_bars} window={cfg.window} gap={gap} "
+            f"train={len(train_indices)} val={len(val_indices)}"
+        )
 
     return (
         full_ds,
@@ -143,12 +176,9 @@ def _eval_loss(
         feats, ids = _collate(batch, tokenizer, device)
         logits = model(feats)
         B, T, V = logits.shape
-        mask = torch.ones(B, T, device=feats.device)
-        mask[:, -1] = 0.0
-        loss = nn.functional.cross_entropy(
-            logits.view(B * T, V), ids.view(B * T), reduction="none"
-        )
-        loss = (loss * mask.view(B * T)).sum() / mask.sum()
+        # Validation mirrors the training objective: one clean next-bar
+        # forecast per window, scored at the final context position.
+        loss = nn.functional.cross_entropy(logits[:, -1, :], ids[:, -1])
         losses.append(loss.item())
     model.train()
     return float(np.mean(losses)) if losses else float("inf")
@@ -206,6 +236,20 @@ def train(cfg: TrainConfig) -> str:
         weight_decay=cfg.weight_decay,
     )
 
+    resume_step = 0
+    resume_val_loss: Optional[float] = None
+    if cfg.resume_from is not None:
+        ckpt = torch.load(cfg.resume_from, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state"])
+        if "optimizer_state" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+        resume_step = int(ckpt.get("step", 0))
+        resume_val_loss = ckpt.get("val_loss")
+        log.info(f"Resumed from {cfg.resume_from} at step={resume_step} val_loss={resume_val_loss}")
+        if resume_val_loss is not None:
+            emitter._last_val_loss = float(resume_val_loss)
+            emitter._best_val_loss = float(resume_val_loss)
+
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.batch_size,
@@ -214,10 +258,11 @@ def train(cfg: TrainConfig) -> str:
         num_workers=0,
     )
 
-    best_val_loss = float("inf")
-    best_ckpt_path: Optional[Path] = None
-    has_validated = False
-    step = 0
+    best_val_loss = float(resume_val_loss) if resume_val_loss is not None else float("inf")
+    best_ckpt_path: Optional[Path] = cfg.resume_from if cfg.resume_from is not None and resume_val_loss is not None else None
+    has_validated = resume_val_loss is not None
+    plateau_evals = 0
+    step = resume_step
     train_start = time.time()
     last_ckpt_time = train_start
     tokens_processed = 0
@@ -234,8 +279,8 @@ def train(cfg: TrainConfig) -> str:
             for batch in train_loader:
                 # Wall-clock cap
                 elapsed = time.time() - train_start
-                if elapsed >= cfg.max_wall_clock_s:
-                    log.info(f"[STOP] 6-hour cap at step {step} ({elapsed/3600:.2f}h)")
+                if cfg.max_wall_clock_s > 0 and math.isfinite(cfg.max_wall_clock_s) and elapsed >= cfg.max_wall_clock_s:
+                    log.info(f"[STOP] wall-clock cap at step {step} ({elapsed/3600:.2f}h)")
                     tag = f"step_{step:07d}"
                     ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss if has_validated else None, cfg, tag)
                     flush_loss = float(np.mean(recent_losses)) if recent_losses else None
@@ -245,7 +290,7 @@ def train(cfg: TrainConfig) -> str:
                     emitter.event("checkpoint", {"step": step, "path": str(ckpt_path)})
                     return cfg.run_id
 
-                if step >= cfg.max_steps:
+                if cfg.max_steps > 0 and step >= cfg.max_steps:
                     log.info(f"[STOP] max_steps={cfg.max_steps} reached.")
                     emitter.update(step=step, state="done", force=True)
                     return cfg.run_id
@@ -258,15 +303,20 @@ def train(cfg: TrainConfig) -> str:
                 feats, ids = _collate(batch, tokenizer, device)
                 logits = model(feats)
                 B, T, V = logits.shape
-                # Mask out the last position (sentinel target — no next bar exists)
-                mask = torch.ones(B, T, device=feats.device)
-                mask[:, -1] = 0.0
-                loss = nn.functional.cross_entropy(
-                    logits.view(B * T, V),
-                    ids.view(B * T),
-                    reduction="none",
-                )
-                loss = (loss * mask.view(B * T)).sum() / mask.sum()
+                if cfg.forecast_only_loss:
+                    # One supervised forecast per sampled window: use all
+                    # context up to the final bar to predict that bar's next
+                    # return. This avoids rewarding the model for repeatedly
+                    # reconstructing the same overlapping historical labels.
+                    loss = nn.functional.cross_entropy(logits[:, -1, :], ids[:, -1])
+                else:
+                    # Legacy sequence loss: valid for ablations only. The last
+                    # position is now safe because clean split construction
+                    # excludes the file-level sentinel target.
+                    loss = nn.functional.cross_entropy(
+                        logits.view(B * T, V),
+                        ids.view(B * T),
+                    )
                 optimizer.zero_grad()
                 loss.backward()
                 grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip).item()
@@ -312,12 +362,29 @@ def train(cfg: TrainConfig) -> str:
                     emitter.event("val", {"step": step, "val_loss": val_loss})
                     last_eval_step = step
                     has_validated = True
-                    if val_loss < best_val_loss:
+                    if val_loss < best_val_loss - cfg.early_stop_min_delta:
                         best_val_loss = val_loss
+                        plateau_evals = 0
                         best_ckpt_path = _save_checkpoint(
                             model, optimizer, step, val_loss, cfg, "best_val"
                         )
                         log.info(f"  [val] NEW BEST: {val_loss:.4f}")
+                    elif cfg.early_stop_patience_evals is not None:
+                        plateau_evals += 1
+                        log.info(
+                            f"  [val] no meaningful improvement: {plateau_evals}/"
+                            f"{cfg.early_stop_patience_evals} evals"
+                        )
+                        if plateau_evals >= cfg.early_stop_patience_evals:
+                            log.info(
+                                f"[STOP] validation plateau: best_val_loss={best_val_loss:.4f} "
+                                f"patience={cfg.early_stop_patience_evals} min_delta={cfg.early_stop_min_delta}"
+                            )
+                            tag = f"step_{step:07d}"
+                            ckpt_path = _save_checkpoint(model, optimizer, step, best_val_loss if has_validated else None, cfg, tag)
+                            emitter.update(step=step, state="done", last_checkpoint_step=step, force=True)
+                            emitter.event("checkpoint", {"step": step, "path": str(ckpt_path)})
+                            return cfg.run_id
 
                 # Periodic checkpoint
                 now = time.time()

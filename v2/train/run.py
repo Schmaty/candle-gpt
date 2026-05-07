@@ -30,8 +30,14 @@ def main() -> None:
     ap.add_argument("--raw-dir", type=Path, default=Path("v2/data/raw"))
     ap.add_argument("--runs-dir", type=Path, default=Path("v2/runs"))
     ap.add_argument("--eval-only", type=str, default=None)
+    ap.add_argument("--resume-from", type=Path, default=None,
+                    help="Resume model+optimizer state from a checkpoint.")
+    ap.add_argument("--early-stop-patience-evals", type=int, default=None,
+                    help="Stop after N validation checks without meaningful best-val improvement.")
+    ap.add_argument("--early-stop-min-delta", type=float, default=0.001,
+                    help="Minimum val-loss improvement counted for plateau stopping.")
     ap.add_argument("--max-wall-clock-h", type=float, default=None,
-                    help="Override wall-clock cap in hours (default: TrainConfig's 6h)")
+                    help="Override wall-clock cap in hours; 0 disables wall-clock stopping.")
     args = ap.parse_args()
 
     cfg = TrainConfig(
@@ -50,7 +56,14 @@ def main() -> None:
     if cfg.window != cfg.model.block_size:
         cfg.model.block_size = cfg.window
     if args.max_wall_clock_h is not None:
-        cfg.max_wall_clock_s = args.max_wall_clock_h * 3600.0
+        # Use 0 as the internal "no wall-clock cap" sentinel. Avoid inf so
+        # status.json remains strict JSON for the dashboard.
+        cfg.max_wall_clock_s = 0.0 if args.max_wall_clock_h <= 0 else args.max_wall_clock_h * 3600.0
+    if args.resume_from is not None:
+        cfg.resume_from = args.resume_from
+    if args.early_stop_patience_evals is not None:
+        cfg.early_stop_patience_evals = args.early_stop_patience_evals
+        cfg.early_stop_min_delta = args.early_stop_min_delta
     if args.run_id:
         cfg.run_id = args.run_id
 
@@ -63,7 +76,8 @@ def main() -> None:
 
     print(f"Starting training run: {cfg.run_id}")
     print(f"Run dir: {cfg.run_dir}")
-    print(f"Max wall clock: {cfg.max_wall_clock_s/3600:.1f}h")
+    wall = "none" if cfg.max_wall_clock_s <= 0 else f"{cfg.max_wall_clock_s/3600:.1f}h"
+    print(f"Max wall clock: {wall}")
 
     run_id = train(cfg)
     print(f"Training finished. run_id={run_id}")

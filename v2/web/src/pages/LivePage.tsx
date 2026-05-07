@@ -460,14 +460,14 @@ export function LivePage() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
               <span className="tcp-status-dot" />
               <span style={{ fontSize: 10, letterSpacing: '0.2em', color: '#71717a', textTransform: 'uppercase' }}>
-                Live BTC/USDT · model run via /predict
+                Live BTC/USDT · loaded inference checkpoint via /predict
               </span>
             </div>
             <h1 className="tcp-display" style={{ fontSize: 56, fontWeight: 600, lineHeight: 1, margin: 0 }}>
               Tokenized Candle <span style={{ fontStyle: 'italic', color: 'rgba(125, 211, 252, 0.9)' }}>Predictor</span>
             </h1>
             <p style={{ fontSize: 14, color: '#71717a', marginTop: 12, maxWidth: 560 }}>
-              Hover any candle to project the next {HORIZON} bars from that point. Click to pin. Prediction comes from the trained CandleGPTv2 model anchored at the chosen bar.
+              Hover any candle to project the next {HORIZON} bars from that point. Click to pin. Prediction uses the currently loaded inference checkpoint, which may lag behind the actively training run until reload.
             </p>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-end' }}>

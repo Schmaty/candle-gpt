@@ -106,7 +106,8 @@ _ALLOWED_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"}
 
 @app.get("/api/v2/candles")
 def candles(limit: int = 300, interval: str = "1m"):
-    limit = max(50, min(int(limit), 520))
+    # 32M v2.1 checkpoints use 768-bar context; Binance allows up to 1000.
+    limit = max(50, min(int(limit), 1000))
     if interval not in _ALLOWED_INTERVALS:
         raise HTTPException(400, f"interval must be one of {sorted(_ALLOWED_INTERVALS)}")
     try:
@@ -147,7 +148,8 @@ def predict(
     if inference.model is None:
         raise HTTPException(503, "no model loaded")
     horizon = max(1, min(int(horizon), 100))
-    limit = max(50, min(int(limit), 520))
+    # 32M v2.1 checkpoints need >=768 bars of context for anchor prediction.
+    limit = max(50, min(int(limit), 1000))
     try:
         return inference.predict_at_anchor(
             anchor=anchor, anchor_time=anchor_time,

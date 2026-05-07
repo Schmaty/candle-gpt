@@ -12,7 +12,15 @@ class TrainingView:
     def _latest_run_dir(self) -> Optional[Path]:
         if not self.runs_dir.exists():
             return None
-        # Sort by name (YYYYMMDD_HHMMSS format) — more reliable than mtime.
+        # Prefer the run explicitly selected by the server/dashboard. This
+        # avoids newer abandoned "starting" runs hiding the loaded model.
+        current_id_file = self.runs_dir / "current_run_id.txt"
+        if current_id_file.exists():
+            run_id = current_id_file.read_text().strip()
+            selected = self.runs_dir / run_id
+            if selected.is_dir() and (selected / "status.json").exists():
+                return selected
+        # Fallback: sort by name (YYYYMMDD_HHMMSS format) — more reliable than mtime.
         candidates = sorted(
             (p for p in self.runs_dir.iterdir() if p.is_dir() and (p / "status.json").exists()),
             key=lambda p: p.name,

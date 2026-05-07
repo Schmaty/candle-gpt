@@ -1,6 +1,7 @@
 """Live training progress emission for the dashboard."""
 from __future__ import annotations
 import json
+import math
 import os
 import platform
 import socket
@@ -101,10 +102,16 @@ class ProgressEmitter:
             self._last_val_loss = val_loss
             if self._best_val_loss is None or val_loss < self._best_val_loss:
                 self._best_val_loss = val_loss
-        step_eta = ((self.max_steps - step) * (elapsed / max(step, 1))) if step > 0 else self.wall_clock_cap_s
-        wall_eta = max(self.wall_clock_cap_s - elapsed, 0.0)
+        has_step_cap = self.max_steps > 0
+        step_eta = ((self.max_steps - step) * (elapsed / max(step, 1))) if step > 0 and has_step_cap else float("inf")
+        has_wall_cap = self.wall_clock_cap_s not in (None, 0.0) and math.isfinite(self.wall_clock_cap_s)
+        wall_eta = max(self.wall_clock_cap_s - elapsed, 0.0) if has_wall_cap else float("inf")
         eta = min(step_eta, wall_eta)
-        progress = max(step / max(self.max_steps, 1), elapsed / self.wall_clock_cap_s)
+        if not math.isfinite(eta):
+            eta = 0.0
+        progress = step / max(self.max_steps, 1) if has_step_cap else 0.0
+        if has_wall_cap:
+            progress = max(progress, elapsed / self.wall_clock_cap_s)
         progress = min(progress, 1.0)
         status = TrainingStatus(
             run_id=self.run_dir.name,

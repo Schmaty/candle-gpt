@@ -28,6 +28,11 @@ class TrainConfig:
     window: int = 1024
     stride_train: int = 16
     stride_val: int = 1024
+    # Keep target labels away from split boundaries. With forecast-only loss,
+    # each window's supervised target is the final bar in that window; this gap
+    # prevents train/val/test targets from sitting immediately adjacent while
+    # still allowing validation windows to use past context.
+    split_gap_bars: int | None = None
 
     # --- Split (by bar index) ---
     train_frac: float = 0.72
@@ -48,12 +53,19 @@ class TrainConfig:
 
     # --- Wall-clock cap ---
     max_wall_clock_s: float = 6 * 3600.0
+    resume_from: Path | None = None
+    early_stop_patience_evals: int | None = None
+    early_stop_min_delta: float = 0.001
     checkpoint_interval_s: float = 30 * 60.0
 
     # --- Eval ---
     val_interval_steps: int = 500
     val_batches: int = 100
     log_interval_steps: int = 50
+    # If True, compute loss only on the final timestep in each window. This
+    # turns every sample into one clean next-bar forecast instead of scoring all
+    # heavily-overlapping timesteps inside the context window.
+    forecast_only_loss: bool = True
 
     # --- Tokenizer ---
     n_bins: int = 256

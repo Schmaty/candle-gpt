@@ -147,10 +147,13 @@ def test_group_i_log_liq_count_nonnegative():
     assert (out["log_liq_count"] >= 0).all()
 
 
-def test_group_j_time_index_norm_starts_at_zero():
+def test_group_j_absolute_keys_are_zeroed():
     df = _make_raw_df(100)
     out = compute_features(df)
-    assert out["time_index_norm"].iloc[0] == pytest.approx(0.0, abs=1e-8)
+    # Schema positions are retained for checkpoint compatibility, but the
+    # values are zeroed so models cannot memorize absolute price/time.
+    assert (out["time_index_norm"] == 0.0).all()
+    assert (out["log_close"] == 0.0).all()
 
 
 def test_single_bar_does_not_crash():

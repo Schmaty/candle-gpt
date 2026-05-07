@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createChart, type IChartApi, LineSeries } from 'lightweight-charts'
 import { getTrainingStatus, getTrainingEvents, getSystemStats } from '../api'
-import { ProgressBar } from '../components/ProgressBar'
-import { SpecPanel } from '../components/SpecPanel'
 
 const STATE_COLORS: Record<string, string> = {
   starting: '#4a90e2', training: 'var(--accent)', evaluating: '#f5a623',
@@ -14,6 +12,25 @@ function fmt_s(s: number | null | undefined): string {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60)
   if (h > 0) return `${h}h ${m}m`
   return `${m}m ${sec}s`
+}
+
+function fmt_pct(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—'
+  return `${(v * 100).toFixed(1)}%`
+}
+
+function fmt_num(v: number | null | undefined, digits = 2): string {
+  if (v == null || !Number.isFinite(v)) return '—'
+  if (Math.abs(v) >= 1000) return Math.round(v).toLocaleString()
+  return v.toFixed(digits)
+}
+
+function chartSize(el: HTMLElement, fallbackHeight: number) {
+  const rect = el.getBoundingClientRect()
+  const width = Math.max(320, Math.floor(rect.width || el.clientWidth || 0))
+  const cssHeight = parseFloat(getComputedStyle(el).height || '')
+  const height = Math.max(120, Math.floor(rect.height || el.clientHeight || cssHeight || fallbackHeight))
+  return { width, height }
 }
 
 export function TrainingPage() {
@@ -52,51 +69,74 @@ export function TrainingPage() {
     return () => clearInterval(id)
   }, [])
 
-  // Poll events every 5s, update chart
+  // Poll events every 5s, update chart. Important: this depends on loading
+  // because the chart containers do not exist during the initial Loading state.
   useEffect(() => {
-    if (!lossRef.current) return
+    if (loading || !status?.available || !lossRef.current || lossChart.current) return
     const chart = createChart(lossRef.current, {
       layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
       grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
       rightPriceScale: { borderColor: '#252d3d' },
       timeScale: { borderColor: '#252d3d', timeVisible: false },
-      width: lossRef.current.clientWidth,
-      height: 220,
+      ...chartSize(lossRef.current, 260),
     })
     const ts = chart.addSeries(LineSeries, { color: '#00d4aa', lineWidth: 2, title: 'train' })
-    const vs = chart.addSeries(LineSeries, { color: '#f5a623', lineWidth: 1, title: 'val' })
+    const vs = chart.addSeries(LineSeries, { color: '#f5a623', lineWidth: 2, title: 'val' })
     lossChart.current = chart
     trainSeries.current = ts
     valSeries.current = vs
 
+    // If events loaded before the chart mounted, draw them now.
+    ts.setData([...trainPoints.current].sort((a, b) => a.time - b.time) as any)
+    vs.setData([...valPoints.current].sort((a, b) => a.time - b.time) as any)
+    chart.timeScale().fitContent()
+
     const ro = new ResizeObserver(() => {
-      if (lossRef.current) chart.resize(lossRef.current.clientWidth, 220)
+      if (lossRef.current) {
+        const { width, height } = chartSize(lossRef.current, 260)
+        chart.resize(width, height)
+      }
     })
     ro.observe(lossRef.current)
 
-    return () => { ro.disconnect(); chart.remove() }
-  }, [])
+    return () => {
+      ro.disconnect()
+      chart.remove()
+      lossChart.current = null
+      trainSeries.current = null
+      valSeries.current = null
+    }
+  }, [loading, status?.available])
 
-  // Throughput sparkline chart
+  // Throughput sparkline chart. Also waits until the real dashboard DOM exists.
   useEffect(() => {
-    if (!throughputRef.current) return
+    if (loading || !status?.available || !throughputRef.current || throughputChart.current) return
     const chart = createChart(throughputRef.current, {
       layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
       grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
       rightPriceScale: { borderColor: '#252d3d' },
       timeScale: { borderColor: '#252d3d', timeVisible: false },
-      width: throughputRef.current.clientWidth,
-      height: 100,
+      ...chartSize(throughputRef.current, 140),
     })
-    const ts = chart.addSeries(LineSeries, { color: '#9b59b6', lineWidth: 1 })
+    const ts = chart.addSeries(LineSeries, { color: '#9b59b6', lineWidth: 2 })
     throughputChart.current = chart
     throughputSeries.current = ts
+    ts.setData([...throughputPoints.current].sort((a, b) => a.time - b.time) as any)
+    chart.timeScale().fitContent()
     const ro = new ResizeObserver(() => {
-      if (throughputRef.current) chart.resize(throughputRef.current.clientWidth, 100)
+      if (throughputRef.current) {
+        const { width, height } = chartSize(throughputRef.current, 140)
+        chart.resize(width, height)
+      }
     })
     ro.observe(throughputRef.current)
-    return () => { ro.disconnect(); chart.remove() }
-  }, [])
+    return () => {
+      ro.disconnect()
+      chart.remove()
+      throughputChart.current = null
+      throughputSeries.current = null
+    }
+  }, [loading, status?.available])
 
   const trainPoints = useRef<{time: number, value: number}[]>([])
   const valPoints = useRef<{time: number, value: number}[]>([])
@@ -141,11 +181,11 @@ export function TrainingPage() {
         }
       }
       if (changed) {
-        trainSeries.current?.setData([...trainPoints.current].sort((a, b) => a.time - b.time))
-        valSeries.current?.setData([...valPoints.current].sort((a, b) => a.time - b.time))
+        trainSeries.current?.setData([...trainPoints.current].sort((a, b) => a.time - b.time) as any)
+        valSeries.current?.setData([...valPoints.current].sort((a, b) => a.time - b.time) as any)
         lossChart.current?.timeScale().fitContent()
         if (throughputPoints.current.length > 0) {
-          throughputSeries.current?.setData([...throughputPoints.current].sort((a, b) => a.time - b.time))
+          throughputSeries.current?.setData([...throughputPoints.current].sort((a, b) => a.time - b.time) as any)
           throughputChart.current?.timeScale().fitContent()
         }
         setEventCount(c => c + res.events.length)
@@ -211,129 +251,244 @@ export function TrainingPage() {
     }
   }
   const cap = status.wall_clock_cap_s ?? 1
-  const stepProgress = (status.step ?? 0) / Math.max(1, status.max_steps ?? 1)
-  const timeProgress = displayElapsed / cap
-  const progress = Math.min(1, Math.max(stepProgress, timeProgress))
+  const stepProgress = Math.min(1, (status.step ?? 0) / Math.max(1, status.max_steps ?? 1))
+  const timeProgress = Math.min(1, displayElapsed / cap)
+  // The main progress bar is step progress. Wall-clock cap progress is shown
+  // separately so the bar doesn't say ~4% while the label says step ~2%.
+  const progress = stepProgress
+
+  const model = status.model ?? {}
+  const hasBestCheckpoint = status.best_val_loss != null
+  const healthTone =
+    status.state === 'failed' ? 'danger' :
+    status.state === 'done' ? 'success' :
+    status.state === 'training' ? 'success' :
+    status.state === 'evaluating' || status.state === 'checkpointing' ? 'warning' : 'neutral'
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Header strip */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--fg-dim)' }}>{status.run_id}</span>
-        <span style={{ background: stateColor, color: '#0b0e13', borderRadius: 4, padding: '2px 8px', fontSize: 12, fontWeight: 600 }}>
-          {status.state}
-        </span>
-        <span style={{ color: 'var(--fg-dim)', fontSize: 13 }}>elapsed {fmt_s(displayElapsed)}</span>
-        <span style={{ color: 'var(--fg-dim)', fontSize: 13 }}>ETA {fmt_s(displayEta)}</span>
-        <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)', fontSize: 13 }}>
-          {((progress) * 100).toFixed(1)}%
-        </span>
-      </div>
-
-      {/* Progress bar */}
-      <ProgressBar
-        frac={progress}
-        label={`step ${status.step?.toLocaleString() ?? 0} / ${status.max_steps?.toLocaleString() ?? '—'} · best_val_loss = ${status.best_val_loss != null ? status.best_val_loss.toFixed(4) : '—'} · last ckpt @ step ${status.last_checkpoint_step ?? '—'}`}
-      />
-
-      {/* Metrics + hardware */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-        <div className="card">
-          <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Live Metrics</div>
-          <div className="metric-row" style={{ marginBottom: 0 }}>
-            {([
-              ['train_loss', 'Train loss', status.train_loss != null ? status.train_loss.toFixed(4) : '—'],
-              ['val_loss',   'Val loss',   status.val_loss   != null ? status.val_loss.toFixed(4)   : '—'],
-              ['best_val',   'Best val',   status.best_val_loss != null ? status.best_val_loss.toFixed(4) : '—'],
-              ['lr',         'LR',         status.lr != null ? status.lr.toExponential(2) : '—'],
-              ['grad_norm',  'Grad norm',  status.grad_norm != null ? status.grad_norm.toFixed(3) : '—'],
-              ['throughput', 'Throughput', status.throughput_tok_per_s != null ? `${Math.round(status.throughput_tok_per_s).toLocaleString()} tok/s` : '—'],
-            ] as Array<[string, string, string]>).map(([key, l, v]) => {
-              const n = METRIC_DEFS[key]?.points().length ?? 0
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setSelectedMetric(key)}
-                  className="metric"
-                  title={n > 0 ? `Click for ${n}-point history` : 'No history yet'}
-                  style={{
-                    minWidth: 110,
-                    background: 'transparent',
-                    border: '1px solid transparent',
-                    borderRadius: 6,
-                    padding: '6px 10px',
-                    margin: 0,
-                    textAlign: 'left',
-                    cursor: n > 0 ? 'pointer' : 'default',
-                    color: 'inherit',
-                    fontFamily: 'inherit',
-                    transition: 'border-color 120ms, background 120ms',
-                  }}
-                  onMouseEnter={e => {
-                    if (n > 0) {
-                      ;(e.currentTarget as HTMLElement).style.borderColor = METRIC_DEFS[key].color
-                      ;(e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.02)'
-                    }
-                  }}
-                  onMouseLeave={e => {
-                    ;(e.currentTarget as HTMLElement).style.borderColor = 'transparent'
-                    ;(e.currentTarget as HTMLElement).style.background = 'transparent'
-                  }}
-                >
-                  <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: METRIC_DEFS[key].color, display: 'inline-block' }} />
-                    {l}
-                  </div>
-                  <div className="value" style={{ fontSize: 15 }}>{v}</div>
-                  <div style={{ fontSize: 10, color: 'var(--fg-dim)', marginTop: 2, fontFamily: 'var(--font-mono)' }}>
-                    {n > 0 ? `${n} pts ›` : '—'}
-                  </div>
-                </button>
-              )
-            })}
+    <div className="training-dashboard">
+      <section className="training-hero card">
+        <div className="training-hero-glow" />
+        <div className="training-hero-main">
+          <div className="eyebrow">CandleGPT training console</div>
+          <div className="training-title-row">
+            <h1>32M parameter run</h1>
+            <span className={`status-pill status-${healthTone}`} style={{ ['--pill-color' as any]: stateColor }}>
+              <span className="status-dot" />{status.state}
+            </span>
           </div>
+          <div className="run-id">{status.run_id}</div>
+          <div className="hero-progress-meta">
+            <span>Step <strong>{status.step?.toLocaleString() ?? 0}</strong> / {status.max_steps?.toLocaleString() ?? '—'}</span>
+            <span>{fmt_pct(progress)} complete</span>
+            <span>{fmt_s(displayElapsed)} elapsed</span>
+            <span>{fmt_s(displayEta)} ETA</span>
+          </div>
+          <div className="pro-progress" aria-label="Training progress">
+            <div className="pro-progress-fill" style={{ width: `${Math.max(2, progress * 100)}%` }} />
+          </div>
+          <div className="hero-subprogress">
+            <span>Step progress {fmt_pct(stepProgress)}</span>
+            <span>Wall-clock cap {fmt_pct(timeProgress)}</span>
+            <span>Last update {status.last_update_utc ? new Date(status.last_update_utc).toLocaleTimeString() : '—'}</span>
+          </div>
+        </div>
+        <div className="training-hero-side">
+          <div className="hero-side-card">
+            <span>Best validation</span>
+            <strong>{status.best_val_loss != null ? status.best_val_loss.toFixed(4) : '—'}</strong>
+            <em>{hasBestCheckpoint ? `last eval @ ${status.last_eval_step ?? '—'}` : 'waiting for first eval'}</em>
+          </div>
+          <div className="hero-side-card muted">
+            <span>Checkpoint</span>
+            <strong>{status.last_checkpoint_step ?? (hasBestCheckpoint ? 'best_val saved' : '—')}</strong>
+            <em>{status.last_checkpoint_step ? 'latest saved step' : 'best checkpoint available'}</em>
+          </div>
+        </div>
+      </section>
+
+      <section className="dashboard-filter-strip card" aria-label="Dashboard filters">
+        <FilterChip label="Run" value={status.run_id} />
+        <FilterChip label="State" value={status.state} toneColor={stateColor} />
+        <FilterChip label="Device" value={status.hardware?.device_name ?? status.hardware?.device ?? '—'} />
+        <FilterChip label="Interval" value={model.interval ?? '—'} />
+        <FilterChip label="Window" value={model.window ? `${model.window} bars` : '—'} />
+        <FilterChip label="Features" value={model.n_features ?? '—'} />
+      </section>
+
+      <section className="kpi-grid kpi-grid-extended">
+        <MetricTile
+          label="Train loss"
+          value={status.train_loss != null ? status.train_loss.toFixed(4) : '—'}
+          accent="#00d4aa"
+          points={METRIC_DEFS.train_loss.points().length}
+          onClick={() => setSelectedMetric('train_loss')}
+        />
+        <MetricTile
+          label="Validation loss"
+          value={status.val_loss != null ? status.val_loss.toFixed(4) : '—'}
+          accent="#f5a623"
+          points={METRIC_DEFS.val_loss.points().length}
+          onClick={() => setSelectedMetric('val_loss')}
+        />
+        <MetricTile
+          label="Learning rate"
+          value={status.lr != null ? status.lr.toExponential(2) : '—'}
+          accent="#4a90e2"
+          points={METRIC_DEFS.lr.points().length}
+          onClick={() => setSelectedMetric('lr')}
+        />
+        <MetricTile
+          label="Throughput"
+          value={status.throughput_tok_per_s != null ? `${Math.round(status.throughput_tok_per_s).toLocaleString()}` : '—'}
+          suffix="tok/s"
+          accent="#9b59b6"
+          points={METRIC_DEFS.throughput.points().length}
+          onClick={() => setSelectedMetric('throughput')}
+        />
+        <MetricTile
+          label="Grad norm"
+          value={status.grad_norm != null ? status.grad_norm.toFixed(3) : '—'}
+          accent="#e74c3c"
+          points={METRIC_DEFS.grad_norm.points().length}
+          onClick={() => setSelectedMetric('grad_norm')}
+        />
+        <MetricTile
+          label="Step progress"
+          value={fmt_pct(stepProgress)}
+          accent="#00b8ff"
+          points={0}
+          onClick={() => {}}
+        />
+        <MetricTile
+          label="Wall clock"
+          value={fmt_pct(timeProgress)}
+          accent="#ffcc66"
+          points={0}
+          onClick={() => {}}
+        />
+        <MetricTile
+          label="Checkpoint"
+          value={`${status.last_checkpoint_step ?? (hasBestCheckpoint ? 'best' : '—')}`}
+          accent="#b084ff"
+          points={0}
+          onClick={() => {}}
+        />
+        <MetricTile
+          label="ETA"
+          value={fmt_s(displayEta)}
+          accent="#7dd3fc"
+          points={0}
+          onClick={() => {}}
+        />
+      </section>
+
+      <section className="dashboard-grid-main">
+        <div className="card chart-card loss-card">
+          <div className="panel-header">
+            <div>
+              <div className="eyebrow">Optimization</div>
+              <h2>Loss curves</h2>
+            </div>
+            <div className="legend-pills">
+              <span><i style={{ background: '#00d4aa' }} /> train</span>
+              <span><i style={{ background: '#f5a623' }} /> val</span>
+              <span>{eventCount} events</span>
+            </div>
+          </div>
+          <div ref={lossRef} className="chart-host loss-chart" />
+        </div>
+
+        <aside className="side-stack">
+          <div className="card pro-panel">
+            <div className="panel-header compact">
+              <div>
+                <div className="eyebrow">Run health</div>
+                <h2>Live status</h2>
+              </div>
+            </div>
+            <div className="status-list">
+              <StatusLine label="State" value={status.state} color={stateColor} />
+              <StatusLine label="Elapsed" value={fmt_s(displayElapsed)} />
+              <StatusLine label="ETA" value={fmt_s(displayEta)} />
+              <StatusLine label="Step progress" value={fmt_pct(stepProgress)} />
+              <StatusLine label="Wall limit" value={fmt_pct(timeProgress)} />
+              <StatusLine label="Last eval" value={status.last_eval_step?.toLocaleString?.() ?? '—'} />
+            </div>
+          </div>
+
+          <div className="card pro-panel">
+            <div className="panel-header compact">
+              <div>
+                <div className="eyebrow">Architecture</div>
+                <h2>Model spec</h2>
+              </div>
+            </div>
+            <div className="spec-grid-pro">
+              <MiniSpec label="Params" value={model.n_params ? `${(model.n_params / 1e6).toFixed(1)}M` : '—'} />
+              <MiniSpec label="Layers" value={model.n_layers ?? '—'} />
+              <MiniSpec label="Heads" value={model.n_heads ?? '—'} />
+              <MiniSpec label="d_model" value={model.d_model ?? '—'} />
+              <MiniSpec label="Window" value={model.window ? `${model.window} bars` : '—'} />
+              <MiniSpec label="Features" value={model.n_features ?? '—'} />
+              <MiniSpec label="Interval" value={model.interval ?? '—'} />
+              <MiniSpec label="Bins" value={model.n_bins ?? '—'} />
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section className="dashboard-grid-secondary">
+        <div className="card chart-card">
+          <div className="panel-header">
+            <div>
+              <div className="eyebrow">Performance</div>
+              <h2>Throughput</h2>
+            </div>
+            <div className="panel-stat">{fmt_num(status.throughput_tok_per_s, 0)} tok/s</div>
+          </div>
+          <div ref={throughputRef} className="chart-host throughput-chart" />
         </div>
 
         {status.hardware && (
-          <SpecPanel title="Hardware" items={[
-            { label: 'Device', value: `${status.hardware.device} — ${status.hardware.device_name}` },
-            { label: 'Host', value: status.hardware.hostname },
-            { label: 'CPUs', value: status.hardware.cpu_count },
-            { label: 'RAM', value: `${status.hardware.ram_gb} GB` },
-            { label: 'PyTorch', value: status.hardware.torch },
-            { label: 'Python', value: status.hardware.python },
-          ]} />
+          <div className="card pro-panel hardware-panel">
+            <div className="panel-header compact">
+              <div>
+                <div className="eyebrow">Hardware</div>
+                <h2>Runtime</h2>
+              </div>
+            </div>
+            <div className="status-list">
+              <StatusLine label="Device" value={`${status.hardware.device} — ${status.hardware.device_name}`} />
+              <StatusLine label="Host" value={status.hardware.hostname} />
+              <StatusLine label="CPU" value={`${status.hardware.cpu_count} cores`} />
+              <StatusLine label="RAM" value={`${status.hardware.ram_gb} GB`} />
+              <StatusLine label="PyTorch" value={status.hardware.torch} />
+              <StatusLine label="Python" value={status.hardware.python} />
+            </div>
+          </div>
         )}
-      </div>
+      </section>
 
-      {/* Loss curves */}
-      <div className="card">
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-          Loss Curves — {eventCount} events loaded · <span style={{ color: '#00d4aa' }}>● train</span> <span style={{ color: '#f5a623' }}>● val</span>
+      <section className="card pro-panel dashboard-detail-panel">
+        <div className="panel-header compact">
+          <div>
+            <div className="eyebrow">Dashboard QA</div>
+            <h2>Training detail table</h2>
+          </div>
+          <div className="panel-stat">grain: run × training step</div>
         </div>
-        <div ref={lossRef} style={{ width: '100%' }} />
-      </div>
-
-      {/* Throughput sparkline */}
-      <div className="card">
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-          <span style={{ color: '#9b59b6' }}>● Throughput</span> tok/s over time
+        <div className="dashboard-detail-grid">
+          <MiniSpec label="Run ID" value={status.run_id} />
+          <MiniSpec label="Current step" value={`${status.step?.toLocaleString() ?? 0} / ${status.max_steps?.toLocaleString() ?? '—'}`} />
+          <MiniSpec label="Latest val" value={status.val_loss != null ? status.val_loss.toFixed(4) : '—'} />
+          <MiniSpec label="Best val" value={status.best_val_loss != null ? status.best_val_loss.toFixed(4) : '—'} />
+          <MiniSpec label="Last eval" value={status.last_eval_step?.toLocaleString?.() ?? '—'} />
+          <MiniSpec label="Checkpoint" value={`${status.last_checkpoint_step ?? (hasBestCheckpoint ? 'best_val' : '—')}`} />
+          <MiniSpec label="Elapsed" value={fmt_s(displayElapsed)} />
+          <MiniSpec label="ETA" value={fmt_s(displayEta)} />
         </div>
-        <div ref={throughputRef} style={{ width: '100%' }} />
-      </div>
-
-      {/* Model spec */}
-      {status.model && (
-        <SpecPanel title="Model" items={[
-          { label: 'Params', value: `${(status.model.n_params / 1e6).toFixed(1)} M` },
-          { label: 'Layers', value: status.model.n_layers },
-          { label: 'Heads', value: status.model.n_heads },
-          { label: 'd_model', value: status.model.d_model },
-          { label: 'n_bins', value: status.model.n_bins },
-          { label: 'Window', value: `${status.model.window} bars` },
-        ]} />
-      )}
+      </section>
 
       <SystemStatsPanel />
 
@@ -348,6 +503,56 @@ export function TrainingPage() {
   )
 }
 
+function MetricTile({
+  label,
+  value,
+  suffix,
+  accent,
+  points,
+  onClick,
+}: {
+  label: string
+  value: string
+  suffix?: string
+  accent: string
+  points: number
+  onClick: () => void
+}) {
+  return (
+    <button type="button" className="kpi-card" onClick={onClick} style={{ ['--tile-accent' as any]: accent }}>
+      <div className="kpi-topline"><span>{label}</span><i /></div>
+      <div className="kpi-value">{value}{suffix && <small>{suffix}</small>}</div>
+      <div className="kpi-foot">{points > 0 ? `${points} history points · click to inspect` : 'waiting for history'}</div>
+    </button>
+  )
+}
+
+function FilterChip({ label, value, toneColor }: { label: string; value: string | number; toneColor?: string }) {
+  return (
+    <div className="filter-chip" style={{ ['--chip-color' as any]: toneColor ?? 'var(--accent)' }}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
+function StatusLine({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="status-line">
+      <span>{label}</span>
+      <strong style={{ color: color ?? 'var(--fg)' }}>{value}</strong>
+    </div>
+  )
+}
+
+function MiniSpec({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="mini-spec">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
 function SystemStatsPanel() {
   const [stats, setStats] = useState<any>(null)
   useEffect(() => {
@@ -364,45 +569,42 @@ function SystemStatsPanel() {
   }, [])
 
   if (!stats) {
-    return (
-      <div className="card" style={{ color: 'var(--fg-dim)', fontSize: 13 }}>Loading system stats…</div>
-    )
+    return <div className="card system-panel loading-panel">Loading system stats…</div>
   }
 
   const cpu = stats.cpu_percent
   const ram = stats.ram_percent
   const gpu = stats.gpu_util_percent
   const thermal = stats.thermal ?? {}
-  const cpuTemp = thermal.cpu_temp_c
-  const gpuTemp = thermal.gpu_temp_c
-  const fan = thermal.fan_rpm
 
   return (
-    <div className="card">
-      <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>
-        Mac stats — refreshing every 1.5s
+    <section className="card system-panel">
+      <div className="panel-header">
+        <div>
+          <div className="eyebrow">Host telemetry</div>
+          <h2>Mac stats</h2>
+        </div>
+        <div className="panel-stat">1.5s refresh</div>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+
+      <div className="usage-grid">
         <UsageGauge label={`CPU (${stats.cpu_count ?? '?'} cores)`} pct={cpu} color="#4a90e2" suffix="%" />
         <UsageGauge label="RAM" pct={ram} color="#f5a623" suffix={ram != null ? `% · ${stats.ram_used_gb ?? '?'} / ${stats.ram_total_gb ?? '?'} GB` : ''} />
         <UsageGauge label="GPU (MPS)" pct={gpu} color="#00d4aa" suffix="%" />
       </div>
 
-      {/* Per-core CPU bars */}
       {Array.isArray(stats.cpu_per_core) && stats.cpu_per_core.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 6 }}>Per-core CPU</div>
-          <div style={{ display: 'flex', gap: 4, alignItems: 'flex-end', height: 36 }}>
+        <div className="core-panel">
+          <div className="core-panel-label">Per-core CPU</div>
+          <div className="core-bars">
             {stats.cpu_per_core.map((p: number, i: number) => (
               <div
                 key={i}
+                className="core-bar"
                 title={`Core ${i}: ${p.toFixed(1)}%`}
                 style={{
-                  flex: 1,
                   height: `${Math.max(2, p)}%`,
                   background: p > 80 ? '#f05252' : p > 50 ? '#f5a623' : '#4a90e2',
-                  borderRadius: 2,
-                  opacity: 0.85,
                 }}
               />
             ))}
@@ -410,34 +612,27 @@ function SystemStatsPanel() {
         </div>
       )}
 
-      {/* Thermal + power */}
-      <div style={{ marginTop: 16, padding: '10px 14px', background: '#0e1620', border: '1px solid #1c2230', borderRadius: 6 }}>
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-          Thermal + power
-        </div>
+      <div className="thermal-panel">
+        <div className="thermal-title">Thermal + power</div>
         {thermal.available ? (
           <>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+            <div className="thermal-grid">
               <ThermalPressure level={thermal.pressure_level} />
               <Stat label="GPU power" value={thermal.gpu_power_mw != null ? `${(thermal.gpu_power_mw / 1000).toFixed(2)} W` : '—'} color="#00d4aa" />
               <Stat label="CPU power" value={thermal.cpu_power_mw != null ? `${(thermal.cpu_power_mw / 1000).toFixed(2)} W` : '—'} color="#4a90e2" />
             </div>
             {thermal.gpu_freq_mhz != null && (
-              <div style={{ marginTop: 8, fontSize: 11, color: 'var(--fg-dim)', fontFamily: 'var(--font-mono)' }}>
-                GPU active freq: {thermal.gpu_freq_mhz} MHz
-              </div>
+              <div className="gpu-frequency">GPU active freq: {thermal.gpu_freq_mhz} MHz</div>
             )}
-            <div style={{ marginTop: 10, fontSize: 11, color: 'var(--fg-dim)', lineHeight: 1.5 }}>
-              Apple Silicon doesn't expose CPU/GPU die temperatures or fan RPM through public macOS APIs. Pressure level and power draw are the available proxies — anything above Nominal pressure means the system is downclocking to manage heat.
+            <div className="thermal-note">
+              Apple Silicon exposes thermal pressure and power draw as the reliable public proxies. Anything above Nominal means macOS may be throttling to manage heat.
             </div>
           </>
         ) : (
-          <div style={{ fontSize: 12, color: 'var(--fg-dim)', lineHeight: 1.6 }}>
-            {thermal.hint || 'Thermal readings unavailable.'}
-          </div>
+          <div className="thermal-note">{thermal.hint || 'Thermal readings unavailable.'}</div>
         )}
       </div>
-    </div>
+    </section>
   )
 }
 
@@ -445,20 +640,13 @@ function UsageGauge({ label, pct, color, suffix }: { label: string; pct: number 
   const v = pct ?? 0
   const ringColor = v > 90 ? '#f05252' : v > 70 ? '#f5a623' : color
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 6 }}>
-        <span style={{ fontSize: 11, color: 'var(--fg-dim)' }}>{label}</span>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 16, color: ringColor }}>
-          {pct != null ? `${pct.toFixed(0)}` : '—'}<span style={{ fontSize: 11, color: 'var(--fg-dim)' }}>{pct != null ? suffix : ''}</span>
-        </span>
+    <div className="usage-gauge" style={{ ['--gauge-color' as any]: ringColor }}>
+      <div className="usage-gauge-head">
+        <span>{label}</span>
+        <strong>{pct != null ? `${pct.toFixed(0)}` : '—'}<small>{pct != null ? suffix : ''}</small></strong>
       </div>
-      <div style={{ height: 8, background: 'var(--bg-elevated)', borderRadius: 4, overflow: 'hidden' }}>
-        <div style={{
-          height: '100%',
-          width: `${Math.max(0, Math.min(100, v))}%`,
-          background: ringColor,
-          transition: 'width 200ms',
-        }} />
+      <div className="usage-track">
+        <div className="usage-fill" style={{ width: `${Math.max(0, Math.min(100, v))}%` }} />
       </div>
     </div>
   )
@@ -466,9 +654,9 @@ function UsageGauge({ label, pct, color, suffix }: { label: string; pct: number 
 
 function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <div>
-      <div style={{ fontSize: 10, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
-      <div style={{ fontSize: 18, fontFamily: 'var(--font-mono)', color: color ?? 'var(--fg)', marginTop: 2 }}>{value}</div>
+    <div className="stat-block" style={{ ['--stat-color' as any]: color ?? 'var(--fg)' }}>
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   )
 }
@@ -481,14 +669,9 @@ function ThermalPressure({ level }: { level: string | null | undefined }) {
     level === 'Nominal'  ? '#00d4aa' :
                            'var(--fg-dim)'
   return (
-    <div>
-      <div style={{ fontSize: 10, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-        Thermal pressure
-      </div>
-      <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ width: 10, height: 10, borderRadius: '50%', background: color }} />
-        <span style={{ fontSize: 18, fontFamily: 'var(--font-mono)', color }}>{level ?? '—'}</span>
-      </div>
+    <div className="thermal-pressure" style={{ ['--pressure-color' as any]: color }}>
+      <span>Thermal pressure</span>
+      <strong><i />{level ?? '—'}</strong>
     </div>
   )
 }

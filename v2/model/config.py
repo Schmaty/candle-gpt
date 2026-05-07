@@ -6,7 +6,7 @@ from typing import Any
 
 @dataclass
 class ModelConfig:
-    n_features: int = 41
+    n_features: int = 45
     d_model: int = 512
     n_heads: int = 8
     n_layers: int = 10

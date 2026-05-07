@@ -55,10 +55,9 @@ const inputStyle: React.CSSProperties = {
 export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
   const [temperature, setTemperature] = useState(1.0)
   const [horizon, setHorizon] = useState(30)
-  // Default 0 — this model's z-scores are tiny (it was trained for ~22k of
-  // 200k planned steps), so anything above ~0.02 filters out every window
-  // and the backtest takes 0 trades. Start at 0 (always-on) and the user
-  // can dial up to find a confidence threshold that actually fires.
+  // Default 0 — current CandleGPT checkpoints usually emit small z-scores,
+  // so a high threshold can filter out every window. Start at 0 (always-on)
+  // and dial up to find a confidence threshold that actually fires.
   const [zThreshold, setZThreshold] = useState(0.0)
   const [feeBps, setFeeBps] = useState(0.0)
   const [startFrac, setStartFrac] = useState(0)
@@ -147,9 +146,9 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
           horizon, minus 2 × fee on round-trip.
         </div>
         <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 12, padding: '8px 12px', background: '#0e1620', border: '1px solid #1c2230', borderRadius: 4 }}>
-          <strong style={{ color: 'var(--fg)' }}>Heads up:</strong> this model's z-scores are very small (it was trained for ~22k of 200k planned steps).
+          <strong style={{ color: 'var(--fg)' }}>Heads up:</strong> current CandleGPT checkpoints usually emit small z-scores.
           Use <code style={{ fontFamily: 'var(--font-mono)', color: '#00d4aa' }}>z_threshold = 0</code> to take a position on every window, then dial up to filter for higher-conviction signals.
-          A threshold of 0.05+ will give you 0 trades on this model.
+          If trades drop to zero, lower the threshold or shorten the horizon.
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', gap: 12, alignItems: 'end', marginBottom: 12 }}>
           <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>

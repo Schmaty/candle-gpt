@@ -3,12 +3,22 @@ from v2.features.constants import FEATURE_COLUMNS, N_FEATURES
 from v2.data.dataset import FEATURE_COLUMNS_WITH_JOIN
 
 
-def test_n_features_is_41():
-    assert N_FEATURES == 41
+def test_n_features_is_45():
+    # v2.1: appended log_return_3, log_return_10, signed_log_volume, realized_vol_12.
+    assert N_FEATURES == 45
 
 
 def test_feature_columns_length():
-    assert len(FEATURE_COLUMNS) == 41
+    assert len(FEATURE_COLUMNS) == 45
+
+
+def test_v20_prefix_is_frozen():
+    # The first 41 columns are the frozen v2.0.0 schema, in order. Old
+    # checkpoints expect this prefix; the inference server slices it.
+    from v2.features.constants import N_FEATURES_LEGACY_V20
+    assert N_FEATURES_LEGACY_V20 == 41
+    assert FEATURE_COLUMNS[N_FEATURES_LEGACY_V20 - 1] == "time_index_norm"
+    assert FEATURE_COLUMNS[N_FEATURES_LEGACY_V20] == "log_return_3"
 
 
 def test_feature_columns_all_unique():

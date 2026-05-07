@@ -5,12 +5,27 @@ __pycache__/
 .venv/
 *.egg-info/
 
-# Data — too large for git, regenerate via fetch.py
-v2/data/raw/*.parquet
+# JS / frontend
+node_modules/
+**/node_modules/
+*.tsbuildinfo
 
-# v1 artifacts (kept on disk, not tracked)
+# Data — too large for git, regenerate via fetch.py
+*.parquet
+v2/data/raw/**/*.parquet
+v2/data/raw/liquidations/
+
+# Model artifacts / training runs — use GitHub Releases or external storage
 checkpoints/
 runs/
+v2/runs/
+v2/runs_dead/
+*.pt
+*.pth
+*.ckpt
+v2/current_run_id.txt
+
+# Local/generated artifacts
 data/*.parquet
 
 # Notebooks
