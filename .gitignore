@@ -14,6 +14,7 @@ node_modules/
 *.parquet
 v2/data/raw/**/*.parquet
 v2/data/raw/liquidations/
+v2/data/synthetic_raw/
 
 # Model artifacts / training runs — use GitHub Releases or external storage
 checkpoints/
