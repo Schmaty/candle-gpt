@@ -14,15 +14,21 @@ def test_defaults():
     assert cfg.block_size == 1024
     assert cfg.n_bins == 256
     assert cfg.dropout == 0.15
+    assert cfg.regime_conditioning is False
+    assert cfg.regime_feature_indices == (26, 27, 28)
 
 
 def test_to_dict_from_dict_roundtrip():
-    cfg = ModelConfig(d_model=128, n_layers=2, n_heads=2, block_size=64, n_bins=32)
+    cfg = ModelConfig(
+        d_model=128, n_layers=2, n_heads=2, block_size=64, n_bins=32,
+        regime_conditioning=True,
+    )
     d = cfg.to_dict()
     cfg2 = ModelConfig.from_dict(d)
     assert cfg2.d_model == 128
     assert cfg2.n_layers == 2
     assert cfg2.block_size == 64
+    assert cfg2.regime_conditioning is True
 
 
 def test_head_dim_must_divide_evenly():

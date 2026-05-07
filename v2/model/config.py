@@ -14,6 +14,11 @@ class ModelConfig:
     block_size: int = 1024
     n_bins: int = 256
     dropout: float = 0.15
+    # If enabled, add a learned per-regime logit bias. This preserves the
+    # public output shape while letting the model adapt bin priors for
+    # untagged/regime_0/regime_1/regime_2 contexts.
+    regime_conditioning: bool = False
+    regime_feature_indices: tuple[int, int, int] = (26, 27, 28)
 
     def __post_init__(self) -> None:
         if self.d_model % self.n_heads != 0:

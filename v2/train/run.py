@@ -46,6 +46,8 @@ def main() -> None:
                     help="Weight for training-only final-hidden-state return Huber loss.")
     ap.add_argument("--aux-direction-loss-weight", type=float, default=0.0,
                     help="Weight for training-only final-hidden-state direction BCE loss.")
+    ap.add_argument("--regime-conditioning", action="store_true",
+                    help="Add learned per-regime logit biases while preserving n_bins output shape.")
     args = ap.parse_args()
 
     cfg = TrainConfig(
@@ -61,6 +63,7 @@ def main() -> None:
         aux_return_loss_weight=args.aux_return_loss_weight,
         aux_direction_loss_weight=args.aux_direction_loss_weight,
     )
+    cfg.model.regime_conditioning = args.regime_conditioning
     if args.stride_train is not None:
         cfg.stride_train = args.stride_train
     # Keep model context length in sync with the training window so reductions

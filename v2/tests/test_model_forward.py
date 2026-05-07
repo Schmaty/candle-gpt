@@ -103,3 +103,27 @@ def test_generate_ids_preserves_training_mode():
     with torch.no_grad():
         model.generate_ids(x, n_steps=2)
     assert model.training, "generate_ids() leaked eval mode"
+
+
+def test_regime_conditioning_preserves_shape_and_changes_logits_by_regime():
+    cfg = ModelConfig(
+        n_features=52, d_model=64, n_heads=4, n_layers=2,
+        ffn_mult=4, block_size=16, n_bins=32, dropout=0.0,
+        regime_conditioning=True,
+    )
+    model = CandleGPTv2(cfg)
+    model.eval()
+    x0 = torch.randn(1, 16, 52)
+    x1 = x0.clone()
+    # Clear the regime one-hot slots, then set different regimes. Other
+    # features are identical, so logits should differ only from regime bias.
+    x0[..., 26:29] = 0.0
+    x1[..., 26:29] = 0.0
+    x0[..., 26] = 1.0  # regime_0
+    x1[..., 27] = 1.0  # regime_1
+    with torch.no_grad():
+        logits0 = model(x0)
+        logits1 = model(x1)
+    assert logits0.shape == (1, 16, 32)
+    assert logits1.shape == logits0.shape
+    assert not torch.allclose(logits0, logits1)

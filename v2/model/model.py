@@ -25,6 +25,9 @@ class CandleGPTv2(nn.Module):
         self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.n_layers)])
         self.ln_f = nn.LayerNorm(cfg.d_model)
         self.head = nn.Linear(cfg.d_model, cfg.n_bins, bias=False)
+        self.regime_logit_bias = (
+            nn.Embedding(4, cfg.n_bins) if cfg.regime_conditioning else None
+        )
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -60,6 +63,16 @@ class CandleGPTv2(nn.Module):
             h = block(h)
         h = self.ln_f(h)
         logits = self.head(h)
+        if self.regime_logit_bias is not None:
+            # Regime one-hots are engineered causal features. Map all-zero
+            #/unknown -> 0, regime_0 -> 1, regime_1 -> 2, regime_2 -> 3.
+            r0_i, r1_i, r2_i = self.cfg.regime_feature_indices
+            regime_feats = x[..., [r0_i, r1_i, r2_i]]
+            active = regime_feats > 0.5
+            known = active.any(dim=-1)
+            regime_id = active.to(torch.int64).argmax(dim=-1) + 1
+            regime_id = torch.where(known, regime_id, torch.zeros_like(regime_id))
+            logits = logits + self.regime_logit_bias(regime_id)
         if return_hidden:
             return logits, h
         return logits
