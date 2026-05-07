@@ -1,4 +1,4 @@
-"""Feature engineering: 18-col joined DataFrame → 45-dim feature vector.
+"""Feature engineering: 18-col joined DataFrame → 52-dim feature vector.
 
 Called by KlineWindowDataset when apply_features=True and a funding/liq join
 has been performed. All NaN produced by rolling warm-up are replaced with 0.0
@@ -64,6 +64,24 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Group B: Volatility ---
     realized_vol_5 = log_return.rolling(5, min_periods=1).std().fillna(0.0)
     realized_vol_12 = log_return.rolling(12, min_periods=1).std().fillna(0.0)
+    # --- Group L (causal higher-timeframe context) ---
+    # For the default 5m interval these map roughly to 1h (12 bars), 3h
+    # volatility (36 bars), and 4h (48 bars) context. They are bar-multiple
+    # summaries rather than resampled partial higher-timeframe candles, which
+    # keeps them causal: every value uses only current/past rows.
+    htf_return_12 = np.log(c / c.shift(12)).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+    htf_return_48 = np.log(c / c.shift(48)).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+    htf_realized_vol_36 = log_return.rolling(36, min_periods=1).std().fillna(0.0)
+    ma12 = c.rolling(12, min_periods=1).mean()
+    ma48 = c.rolling(48, min_periods=1).mean()
+    htf_close_vs_ma12 = (c / ma12 - 1).fillna(0.0)
+    htf_close_vs_ma48 = (c / ma48 - 1).fillna(0.0)
+    roll_min48 = l.rolling(48, min_periods=1).min()
+    roll_max48 = h.rolling(48, min_periods=1).max()
+    htf_range_position_48 = ((c - roll_min48) / (roll_max48 - roll_min48 + 1e-8)).clip(0.0, 1.0).fillna(0.5)
+    vol_mean48 = v.rolling(48, min_periods=1).mean()
+    vol_std48 = v.rolling(48, min_periods=1).std().fillna(1.0)
+    htf_volume_z_48 = ((v - vol_mean48) / (vol_std48 + 1e-8)).fillna(0.0)
     realized_vol_20 = log_return.rolling(20, min_periods=1).std().fillna(0.0)
     realized_vol_60 = log_return.rolling(60, min_periods=1).std().fillna(0.0)
     atr14 = _atr(h, l, c, period=14)
@@ -196,6 +214,13 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
             "log_return_10": log_return_10,
             "signed_log_volume": signed_log_volume,
             "realized_vol_12": realized_vol_12,
+            "htf_return_12": htf_return_12,
+            "htf_return_48": htf_return_48,
+            "htf_realized_vol_36": htf_realized_vol_36,
+            "htf_close_vs_ma12": htf_close_vs_ma12,
+            "htf_close_vs_ma48": htf_close_vs_ma48,
+            "htf_range_position_48": htf_range_position_48,
+            "htf_volume_z_48": htf_volume_z_48,
         },
         index=df.index,
     )

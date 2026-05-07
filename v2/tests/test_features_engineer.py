@@ -1,4 +1,4 @@
-"""compute_features: 18-col joined DataFrame → 41-col engineered DataFrame."""
+"""compute_features: 18-col joined DataFrame → engineered feature DataFrame."""
 import numpy as np
 import pandas as pd
 import pytest
@@ -154,6 +154,19 @@ def test_group_j_absolute_keys_are_zeroed():
     # values are zeroed so models cannot memorize absolute price/time.
     assert (out["time_index_norm"] == 0.0).all()
     assert (out["log_close"] == 0.0).all()
+
+
+def test_group_l_higher_timeframe_features_are_causal_and_bounded():
+    df = _make_raw_df(120)
+    out = compute_features(df)
+    # 12-bar return should be zero until enough causal history exists, then
+    # log(close[t] / close[t-12]). It must not peek at future close values.
+    assert out["htf_return_12"].iloc[11] == pytest.approx(0.0)
+    expected_12 = float(np.log(df["close"].iloc[12] / df["close"].iloc[0]))
+    assert out["htf_return_12"].iloc[12] == pytest.approx(expected_12, rel=1e-5)
+    assert (out["htf_range_position_48"] >= 0.0).all()
+    assert (out["htf_range_position_48"] <= 1.0 + 1e-6).all()
+    assert (out["htf_realized_vol_36"] >= 0.0).all()
 
 
 def test_single_bar_does_not_crash():

@@ -1,4 +1,4 @@
-"""Canonical names for the 41-dimensional v2 engineered feature vector.
+"""Canonical names for the engineered v2 feature vector.
 
 Index positions are stable — downstream code (model, training, dashboard) may
 use FEATURE_COLUMNS.index("name") to retrieve the column position.
@@ -64,8 +64,20 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "log_return_10",
     "signed_log_volume",
     "realized_vol_12",
+    # Group L — causal higher-timeframe context (7) [v2.2]
+    # These are bar-multiple summaries that approximate 15m/1h/4h context on
+    # 5m training bars without changing the output target/head. They are all
+    # computed from current-or-past bars only.
+    "htf_return_12",
+    "htf_return_48",
+    "htf_realized_vol_36",
+    "htf_close_vs_ma12",
+    "htf_close_vs_ma48",
+    "htf_range_position_48",
+    "htf_volume_z_48",
 )
 
 N_FEATURES: int = len(FEATURE_COLUMNS)
 N_FEATURES_LEGACY_V20: int = 41  # frozen position of the v2.0.0 prefix
-assert N_FEATURES == 45, f"Expected 45 features, got {N_FEATURES}"
+N_FEATURES_LEGACY_V21: int = 45  # v2.1 prefix before higher-timeframe context
+assert N_FEATURES == 52, f"Expected 52 features, got {N_FEATURES}"

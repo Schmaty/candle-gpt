@@ -6,7 +6,7 @@ from v2.model.config import ModelConfig
 def test_defaults():
     # v2.1: scaled to ~30M params on 5m bars with 1024-bar context.
     cfg = ModelConfig()
-    assert cfg.n_features == 45
+    assert cfg.n_features == 52
     assert cfg.d_model == 512
     assert cfg.n_heads == 8
     assert cfg.n_layers == 10
