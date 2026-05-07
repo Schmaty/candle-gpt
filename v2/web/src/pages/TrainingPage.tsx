@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { getTrainingStatus, getTrainingEvents, getSystemStats } from '../api'
-import { Panel, SLabel, Divider, MBox, PulseDot } from '../components/dash'
+import { Panel, SLabel, Divider, MBox, Pill, PulseDot } from '../components/dash'
+
+const TERMINAL_STATES = new Set(['done', 'failed', 'stopped', 'completed'])
 
 // ---------- helpers --------------------------------------------------------
 
@@ -173,6 +175,8 @@ export function TrainingPage() {
   const trainPoints = useRef<Pt[]>([])
   const valPoints = useRef<Pt[]>([])
   const tokpsHist = useRef<Pt[]>([])
+  const lrHist = useRef<Pt[]>([])
+  const gradNormHist = useRef<Pt[]>([])
 
   // Poll status every 2s
   useEffect(() => {
@@ -202,9 +206,17 @@ export function TrainingPage() {
       for (const ev of res.events) {
         if (ev.kind === 'step' && ev.step != null) {
           if (ev.loss != null) trainPoints.current.push({ step: ev.step, value: ev.loss })
-          if (ev.throughput_tok_per_s != null) {
+          if (ev.throughput_tok_per_s != null && ev.throughput_tok_per_s > 0) {
             tokpsHist.current.push({ step: ev.step, value: ev.throughput_tok_per_s })
             if (tokpsHist.current.length > 200) tokpsHist.current.shift()
+          }
+          if (ev.lr != null && ev.lr > 0) {
+            lrHist.current.push({ step: ev.step, value: ev.lr })
+            if (lrHist.current.length > 200) lrHist.current.shift()
+          }
+          if (ev.grad_norm != null) {
+            gradNormHist.current.push({ step: ev.step, value: ev.grad_norm })
+            if (gradNormHist.current.length > 200) gradNormHist.current.shift()
           }
         }
         if (ev.kind === 'val' && ev.step != null && ev.val_loss != null) {
@@ -263,9 +275,35 @@ export function TrainingPage() {
   const model = status.model ?? {}
   const hardware = status.hardware ?? {}
 
+  const isTerminal = TERMINAL_STATES.has(status.state)
+  const isFailed = status.state === 'failed'
+  const isDone = status.state === 'done' || status.state === 'completed' || status.state === 'stopped'
+
   const trainLossLast = trainPoints.current[trainPoints.current.length - 1]?.value ?? status.train_loss
   const valLossLast = valPoints.current[valPoints.current.length - 1]?.value ?? status.val_loss
-  const tokpsLast = status.throughput_tok_per_s ?? tokpsHist.current[tokpsHist.current.length - 1]?.value
+
+  // For terminal states, ignore the zeros that the backend writes to status.json.
+  // Fall back to the last-known good value from the streamed events (if any).
+  const tokpsHistLast = tokpsHist.current[tokpsHist.current.length - 1]?.value
+  const lrHistLast = lrHist.current[lrHist.current.length - 1]?.value
+  const gradNormHistLast = gradNormHist.current[gradNormHist.current.length - 1]?.value
+
+  const liveTokps =
+    status.throughput_tok_per_s != null && status.throughput_tok_per_s > 0
+      ? status.throughput_tok_per_s
+      : tokpsHistLast
+  const liveLr =
+    status.lr != null && status.lr > 0 ? status.lr : lrHistLast
+  const liveGradNorm =
+    status.grad_norm != null ? status.grad_norm : gradNormHistLast
+
+  // Final gauge values shown in MBoxes.
+  // - During live runs: show current value or "—".
+  // - After terminal: show last-known-good with a "last known" sub-label,
+  //   or "n/a" if we never observed any non-zero values.
+  const tokpsDisplay = isTerminal ? tokpsHistLast : liveTokps
+  const lrDisplay = isTerminal ? lrHistLast : liveLr
+  const gradNormDisplay = isTerminal ? gradNormHistLast : liveGradNorm
 
   return (
     <div className="cgpt-train-layout">
@@ -273,7 +311,7 @@ export function TrainingPage() {
       <Panel style={{ padding: '12px 18px', gridColumn: '1/-1' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <PulseDot color={status.state === 'training' ? '#4ade80' : status.state === 'failed' ? '#fb7185' : '#fbbf24'} />
+            <PulseDot color={isFailed ? '#fb7185' : isDone ? '#a3a3a3' : status.state === 'training' ? '#4ade80' : '#fbbf24'} />
             <span
               style={{
                 fontSize: 9,
@@ -285,12 +323,23 @@ export function TrainingPage() {
               {status.state}
             </span>
           </div>
+          {isTerminal && (
+            <Pill color={isFailed ? '#fb7185' : '#4ade80'}>
+              {isFailed ? 'Failed' : 'Completed'}
+            </Pill>
+          )}
           <span style={{ height: 12, width: 1, background: 'rgba(255,255,255,.06)' }} />
-          {[
-            ['run', status.run_id ?? '—'],
-            ['elapsed', fmt_s(displayElapsed)],
-            ['eta', `${etaH}h ${etaM}m`],
-          ].map(([k, v]) => (
+          {(isTerminal
+            ? [
+                ['run', status.run_id ?? '—'],
+                ['total', fmt_s(displayElapsed)],
+              ]
+            : [
+                ['run', status.run_id ?? '—'],
+                ['elapsed', fmt_s(displayElapsed)],
+                ['eta', `${etaH}h ${etaM}m`],
+              ]
+          ).map(([k, v]) => (
             <span key={k} style={{ fontSize: 9, color: '#3f3f46', fontFamily: "'JetBrains Mono',monospace" }}>
               {k} <span style={{ color: '#71717a' }}>{v}</span>
             </span>
@@ -327,7 +376,11 @@ export function TrainingPage() {
             accent="#fbbf24"
             sub={bestVal ? `step ${bestVal.step.toLocaleString()}` : undefined}
           />
-          <MBox label="Grad Norm" value={status.grad_norm != null ? status.grad_norm.toFixed(3) : '—'} />
+          <MBox
+            label="Grad Norm"
+            value={gradNormDisplay != null ? gradNormDisplay.toFixed(3) : (isTerminal ? 'n/a' : '—')}
+            sub={isTerminal && gradNormDisplay != null ? 'last known' : undefined}
+          />
         </div>
         <LossChart
           train={trainPoints.current}
@@ -343,9 +396,17 @@ export function TrainingPage() {
       <Panel style={{ padding: 16 }}>
         <SLabel>Throughput &amp; Schedule</SLabel>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 12, marginBottom: 14 }}>
-          <MBox label="Tok / s" value={tokpsLast != null ? `${(tokpsLast / 1000).toFixed(1)}k` : '—'} />
-          <MBox label="Learn Rate" value={status.lr != null ? status.lr.toExponential(1) : '—'} />
-          <MBox label="Step" value={(status.step ?? 0).toLocaleString()} />
+          <MBox
+            label="Tok / s"
+            value={tokpsDisplay != null ? `${(tokpsDisplay / 1000).toFixed(1)}k` : (isTerminal ? 'n/a' : '—')}
+            sub={isTerminal && tokpsDisplay != null ? 'last known' : undefined}
+          />
+          <MBox
+            label="Learn Rate"
+            value={lrDisplay != null ? lrDisplay.toExponential(1) : (isTerminal ? 'n/a' : '—')}
+            sub={isTerminal && lrDisplay != null ? 'last known' : undefined}
+          />
+          <MBox label={isTerminal ? 'Final Step' : 'Step'} value={(status.step ?? 0).toLocaleString()} />
           <MBox label="Progress" value={`${(prog * 100).toFixed(1)}%`} meter={prog} />
         </div>
         <Divider />
