@@ -206,6 +206,10 @@ def train(cfg: TrainConfig) -> str:
     """Run the training loop. Returns run_id."""
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     cfg.ckpt_dir.mkdir(parents=True, exist_ok=True)
+    # Dashboard/server training view follows this pointer. Keep it updated at
+    # run start so custom launches and programmatic TrainConfig runs appear
+    # immediately, not only CLI-launched runs.
+    (cfg.runs_dir / "current_run_id.txt").write_text(cfg.run_id, encoding="utf-8")
 
     logging.basicConfig(
         level=logging.INFO,
