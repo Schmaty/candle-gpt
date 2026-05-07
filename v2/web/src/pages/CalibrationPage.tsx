@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import { createChart, type IChartApi, LineSeries } from 'lightweight-charts'
-import { fetchCalibration, runSweep } from '../api'
+import { useEffect, useMemo, useState } from 'react'
+import { fetchCalibration, fetchHistory, runSweep } from '../api'
+import { Panel, SLabel, Divider, MBox, Pill } from '../components/dash'
 import type { BacktestSeed } from './BacktestPage'
 
 interface Bucket {
@@ -21,28 +21,114 @@ interface SweepRow {
   top1_acc: number
 }
 
+// Reliability chart — bucket bars vs identity line.
+function RelChart({ buckets, W = 300, H = 220 }: { buckets: Bucket[]; W?: number; H?: number }) {
+  const pad = { t: 16, r: 16, b: 32, l: 32 }
+  const IW = W - pad.l - pad.r
+  const IH = H - pad.t - pad.b
+  const tks = [0, 0.25, 0.5, 0.75, 1]
+  return (
+    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`}>
+      {tks.map((t, i) => (
+        <g key={i}>
+          <line
+            x1={pad.l}
+            x2={pad.l + IW}
+            y1={pad.t + IH - t * IH}
+            y2={pad.t + IH - t * IH}
+            stroke="rgba(255,255,255,.04)"
+            strokeWidth="1"
+          />
+          <line
+            x1={pad.l + t * IW}
+            x2={pad.l + t * IW}
+            y1={pad.t}
+            y2={pad.t + IH}
+            stroke="rgba(255,255,255,.04)"
+            strokeWidth="1"
+          />
+          <text
+            x={pad.l - 4}
+            y={pad.t + IH - t * IH + 3}
+            fontSize="8"
+            fill="#3f3f46"
+            fontFamily="'JetBrains Mono',monospace"
+            textAnchor="end"
+          >
+            {t.toFixed(1)}
+          </text>
+          <text
+            x={pad.l + t * IW}
+            y={pad.t + IH + 14}
+            fontSize="8"
+            fill="#3f3f46"
+            fontFamily="'JetBrains Mono',monospace"
+            textAnchor="middle"
+          >
+            {t.toFixed(1)}
+          </text>
+        </g>
+      ))}
+      <line
+        x1={pad.l}
+        x2={pad.l + IW}
+        y1={pad.t + IH}
+        y2={pad.t}
+        stroke="rgba(255,255,255,.1)"
+        strokeWidth="1"
+        strokeDasharray="4 3"
+      />
+      {buckets.map((b, i) => {
+        const bw = Math.max(2, IW / buckets.length - 3)
+        const bx = pad.l + b.conf * IW - bw / 2
+        const bh = b.acc * IH
+        return (
+          <g key={i}>
+            <rect
+              x={bx}
+              y={pad.t + IH - bh}
+              width={bw}
+              height={bh}
+              fill="rgba(56,189,248,.2)"
+              stroke="#38bdf8"
+              strokeWidth=".75"
+              rx="1"
+            />
+            <circle cx={pad.l + b.conf * IW} cy={pad.t + IH - b.acc * IH} r="2.5" fill="#38bdf8" />
+          </g>
+        )
+      })}
+    </svg>
+  )
+}
+
 export function CalibrationPage({ onUseInBacktest }: { onUseInBacktest?: (seed: BacktestSeed) => void }) {
   const [data, setData] = useState<{ buckets: Bucket[]; ece: number } | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const chartRef = useRef<HTMLDivElement>(null)
-  const chart = useRef<IChartApi | null>(null)
-
-  // Sweep controls
-  const [tempsStr, setTempsStr] = useState('0.5,0.8,1.0,1.5,2.0')
-  const [horizonsStr, setHorizonsStr] = useState('1,3,5,10,20,30')
+  // Sweep
+  const [tempsStr, setTempsStr] = useState('0.5, 0.8, 1.0, 1.5, 2.0')
+  const [horizonsStr, setHorizonsStr] = useState('1, 3, 5, 10, 20, 30')
   const [nSamples, setNSamples] = useState(150)
   const [sweepResults, setSweepResults] = useState<SweepRow[] | null>(null)
   const [sweepBest, setSweepBest] = useState<SweepRow | null>(null)
-  const [sweepRunning, setSweepRunning] = useState(false)
+  const [running, setRunning] = useState(false)
   const [sweepError, setSweepError] = useState<string | null>(null)
-  const [sweepElapsedMs, setSweepElapsedMs] = useState<number | null>(null)
+
+  const [sortCol, setSortCol] = useState<keyof SweepRow>('dir_acc')
+  const [sortDir, setSortDir] = useState<-1 | 1>(-1)
+
+  useEffect(() => {
+    fetchCalibration()
+      .then(d => setData(d))
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
 
   const doSweep = async () => {
-    setSweepRunning(true)
+    setRunning(true)
     setSweepError(null)
-    const t0 = performance.now()
     try {
       const T_list = tempsStr.split(',').map(s => parseFloat(s.trim())).filter(x => Number.isFinite(x) && x > 0)
       const H_list = horizonsStr.split(',').map(s => parseInt(s.trim(), 10)).filter(x => Number.isFinite(x) && x > 0)
@@ -52,260 +138,443 @@ export function CalibrationPage({ onUseInBacktest }: { onUseInBacktest?: (seed: 
       const res = await runSweep(T_list, H_list, nSamples)
       setSweepResults(res.results as SweepRow[])
       setSweepBest((res.best as SweepRow) ?? null)
-      setSweepElapsedMs(Math.round(performance.now() - t0))
     } catch (e: any) {
       setSweepError(e.message)
     } finally {
-      setSweepRunning(false)
+      setRunning(false)
     }
   }
 
-  useEffect(() => {
-    fetchCalibration()
-      .then(d => setData(d))
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [])
+  const tog = (col: keyof SweepRow) => {
+    if (sortCol === col) setSortDir(d => (d === -1 ? 1 : -1))
+    else { setSortCol(col); setSortDir(-1) }
+  }
 
-  useEffect(() => {
-    if (!chartRef.current || !data?.buckets?.length) return
+  if (loading) return <div style={{ color: '#52525b', padding: 24, fontSize: 11 }}>Loading calibration…</div>
+  if (error) return <div style={{ color: '#fb7185', padding: 24, fontSize: 11 }}>{error}</div>
 
-    const c = createChart(chartRef.current, {
-      layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
-      grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
-      rightPriceScale: { borderColor: '#252d3d' },
-      timeScale: { borderColor: '#252d3d', timeVisible: false },
-      width: chartRef.current.clientWidth,
-      height: 280,
-    })
-    chart.current = c
+  const sortedRows = sweepResults
+    ? [...sweepResults].sort((a, b) => {
+        const av = a[sortCol]
+        const bv = b[sortCol]
+        if (av == null) return 1
+        if (bv == null) return -1
+        return sortDir * ((av as number) - (bv as number))
+      })
+    : null
 
-    // Actual accuracy per confidence bucket (teal line)
-    const actualSeries = c.addSeries(LineSeries, { color: '#00d4aa', lineWidth: 2, title: 'actual' })
-    // Perfect calibration diagonal (red dashed)
-    const idealSeries = c.addSeries(LineSeries, { color: '#f05252', lineWidth: 1, lineStyle: 2, title: 'ideal' })
-
-    // Use bucket index as monotonically increasing time (lw-charts requires this)
-    const actualData = data.buckets.map((b, i) => ({ time: i + 1 as any, value: b.acc }))
-    const idealData = data.buckets.map((b, i) => ({ time: i + 1 as any, value: b.conf }))
-
-    actualSeries.setData(actualData)
-    idealSeries.setData(idealData)
-    c.timeScale().fitContent()
-
-    const ro = new ResizeObserver(() => {
-      if (chartRef.current) c.resize(chartRef.current.clientWidth, 280)
-    })
-    ro.observe(chartRef.current)
-
-    return () => { ro.disconnect(); c.remove() }
-  }, [data])
-
-  if (loading) return <div style={{ color: 'var(--fg-dim)', padding: 24 }}>Loading calibration…</div>
-  if (error) return <div style={{ color: 'var(--red)', padding: 24 }}>{error}</div>
-
-  if (!data?.buckets?.length) {
-    return (
-      <div className="card" style={{ maxWidth: 480, marginTop: 32 }}>
-        <div style={{ color: 'var(--fg-dim)', fontSize: 13 }}>
-          No calibration data available. Run evaluation after training.
-        </div>
-      </div>
-    )
+  const th: React.CSSProperties = {
+    fontSize: 8,
+    letterSpacing: '.12em',
+    textTransform: 'uppercase',
+    padding: '7px 10px',
+    cursor: 'pointer',
+    userSelect: 'none',
+    whiteSpace: 'nowrap',
+    textAlign: 'left',
+  }
+  const td: React.CSSProperties = {
+    padding: '6px 10px',
+    fontSize: 9,
+    fontFamily: "'JetBrains Mono',monospace",
+    borderBottom: '1px solid rgba(255,255,255,.025)',
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div className="metric">
-        <div className="label">ECE (Expected Calibration Error)</div>
-        <div className="value">{data.ece.toFixed(4)}</div>
-      </div>
-
-      <div className="card">
-        <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginBottom: 8 }}>
-          <span style={{ color: '#00d4aa' }}>● Actual accuracy</span> per confidence bucket ·{' '}
-          <span style={{ color: '#f05252' }}>— Perfect calibration</span>
-        </div>
-        <div ref={chartRef} style={{ width: '100%' }} />
-      </div>
-
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-        <table>
-          <thead>
-            <tr>
-              <th>Confidence range</th>
-              <th>Avg conf</th>
-              <th>Avg acc</th>
-              <th>Gap</th>
-              <th>Fraction</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.buckets.map((b, i) => {
-              const gap = b.conf - b.acc
-              return (
-                <tr key={i}>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                    [{b.lo.toFixed(1)}, {b.hi.toFixed(1)})
-                  </td>
-                  <td style={{ fontFamily: 'var(--font-mono)', color: '#00d4aa' }}>{b.conf.toFixed(3)}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', color: '#f5a623' }}>{b.acc.toFixed(3)}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', color: Math.abs(gap) > 0.1 ? 'var(--red)' : 'var(--fg-dim)', fontSize: 12 }}>
-                    {gap >= 0 ? '+' : ''}{gap.toFixed(3)}
-                  </td>
-                  <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--fg-dim)', fontSize: 12 }}>
-                    {(b.frac * 100).toFixed(1)}%
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Settings sweep */}
-      <div className="card">
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-          Settings sweep — find the (temperature, horizon) that maximizes directional accuracy
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginBottom: 12, lineHeight: 1.5 }}>
-          For each pair, samples N test windows, applies the temperature to the model's logits, and checks
-          whether the predicted return's sign matches the actual cumulative return over <em>horizon</em> bars.
-          One forward pass per window — temperatures rescale the same logits.
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 12, alignItems: 'end', marginBottom: 12 }}>
-          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            Temperatures (comma-separated)
-            <input value={tempsStr} onChange={e => setTempsStr(e.target.value)} style={inputStyle} />
-          </label>
-          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            Horizons in bars (comma-separated)
-            <input value={horizonsStr} onChange={e => setHorizonsStr(e.target.value)} style={inputStyle} />
-          </label>
-          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            Samples per pair
-            <input type="number" min={20} max={1000} value={nSamples} onChange={e => setNSamples(parseInt(e.target.value, 10) || 150)} style={inputStyle} />
-          </label>
-          <button onClick={doSweep} disabled={sweepRunning} style={{ height: 32 }}>
-            {sweepRunning ? 'Running…' : 'Run sweep'}
-          </button>
-        </div>
-        {sweepError && <div style={{ color: 'var(--red)', fontSize: 12, marginBottom: 8 }}>{sweepError}</div>}
-        {sweepBest && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '10px 14px', background: '#0e1620', border: '1px solid #1c2230', borderRadius: 6, marginBottom: 12 }}>
-            <span style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Best</span>
-            <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--fg)' }}>
-              T = <span style={{ color: '#00d4aa' }}>{sweepBest.temperature}</span>
-              {'  ·  '}
-              H = <span style={{ color: '#00d4aa' }}>{sweepBest.horizon}</span>
-              {'  ·  '}
-              dir_acc = <span style={{ color: '#00d4aa' }}>{(sweepBest.dir_acc! * 100).toFixed(1)}%</span>
-              {'  '}
-              <span style={{ color: 'var(--fg-dim)', fontSize: 12 }}>(n={sweepBest.n_valid})</span>
-            </span>
-            {onUseInBacktest && (
-              <button
-                onClick={() => onUseInBacktest({ temperature: sweepBest.temperature, horizon: sweepBest.horizon })}
-                style={{ marginLeft: 'auto' }}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div className="cgpt-cal-layout">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Panel style={{ padding: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+            <SLabel>Reliability</SLabel>
+            {data && <Pill>ECE {data.ece.toFixed(4)}</Pill>}
+          </div>
+          {data && data.buckets.length > 0 ? (
+            <>
+              <RelChart buckets={data.buckets} W={264} H={200} />
+              <Divider />
+              <div style={{ fontSize: 8, color: '#2a2a2e', letterSpacing: '.08em', lineHeight: 1.8 }}>
+                Predicted probability vs realized frequency. Bars above diagonal = underconfident.
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 9, color: '#3f3f46' }}>No calibration data — run evaluation.</div>
+          )}
+        </Panel>
+        <Panel style={{ padding: 16 }}>
+          <SLabel>Run Sweep</SLabel>
+          {([
+            ['Temperatures', tempsStr, setTempsStr],
+            ['Horizons', horizonsStr, setHorizonsStr],
+          ] as Array<[string, string, (s: string) => void]>).map(([lbl, val, set]) => (
+            <div key={lbl} style={{ marginBottom: 10 }}>
+              <div
+                style={{
+                  fontSize: 8,
+                  color: '#52525b',
+                  letterSpacing: '.12em',
+                  textTransform: 'uppercase',
+                  marginBottom: 4,
+                }}
               >
-                Use in backtest →
-              </button>
-            )}
+                {lbl}
+              </div>
+              <input type="text" value={val} onChange={e => set(e.target.value)} />
+            </div>
+          ))}
+          <div style={{ marginBottom: 10 }}>
+            <div
+              style={{
+                fontSize: 8,
+                color: '#52525b',
+                letterSpacing: '.12em',
+                textTransform: 'uppercase',
+                marginBottom: 4,
+              }}
+            >
+              Samples per pair
+            </div>
+            <input
+              type="number"
+              value={nSamples}
+              min={20}
+              max={1000}
+              onChange={e => setNSamples(parseInt(e.target.value, 10) || 150)}
+            />
           </div>
-        )}
-        {sweepResults && sweepResults.length > 0 && (
-          <SweepHeatmap rows={sweepResults} onPick={onUseInBacktest} />
-        )}
-        {sweepElapsedMs !== null && (
-          <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 8 }}>
-            Sweep took {(sweepElapsedMs / 1000).toFixed(2)}s.
-          </div>
-        )}
+          <button
+            onClick={doSweep}
+            disabled={running}
+            style={{
+              width: '100%',
+              padding: '9px 0',
+              borderRadius: 10,
+              marginTop: 4,
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: '.15em',
+              textTransform: 'uppercase',
+              background: running ? 'rgba(56,189,248,.04)' : 'rgba(56,189,248,.08)',
+              color: running ? '#52525b' : '#7dd3fc',
+              border: '1px solid rgba(56,189,248,.15)',
+              cursor: running ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {running ? '— sweeping —' : '→ run sweep'}
+          </button>
+          {sweepError && (
+            <div style={{ color: '#fb7185', fontSize: 9, marginTop: 8 }}>{sweepError}</div>
+          )}
+        </Panel>
       </div>
+
+      <Panel style={{ padding: 16, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <SLabel>Sweep Results</SLabel>
+          {sweepBest && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <Pill color="#fbbf24">
+                best: T={sweepBest.temperature} H={sweepBest.horizon}
+                {sweepBest.dir_acc != null ? ` · ${(sweepBest.dir_acc * 100).toFixed(1)}%` : ''}
+              </Pill>
+              {onUseInBacktest && (
+                <button
+                  onClick={() => onUseInBacktest({ temperature: sweepBest.temperature, horizon: sweepBest.horizon })}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: 7,
+                    fontSize: 9,
+                    fontWeight: 700,
+                    letterSpacing: '.1em',
+                    textTransform: 'uppercase',
+                    background: 'transparent',
+                    color: '#7dd3fc',
+                    border: '1px solid rgba(125,211,252,.25)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  → use in backtest
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        {!sortedRows && (
+          <div className="float-hint" style={{ fontSize: 9, color: '#2a2a2e', textAlign: 'center', padding: 24 }}>
+            No sweep run yet — configure and click run.
+          </div>
+        )}
+        {sortedRows && (
+          <div style={{ overflowX: 'auto' }}>
+            <table>
+              <thead>
+                <tr style={{ borderBottom: '1px solid rgba(255,255,255,.06)' }}>
+                  {([
+                    ['temperature', 'T'],
+                    ['horizon', 'H'],
+                    ['n_valid', 'N'],
+                    ['dir_acc', 'DIR ACC'],
+                    ['mean_conf', 'CONF'],
+                    ['top1_acc', 'TOP-1'],
+                    ['ece', 'ECE'],
+                  ] as Array<[keyof SweepRow, string]>).map(([col, lbl]) => (
+                    <th
+                      key={col as string}
+                      style={{ ...th, color: sortCol === col ? '#7dd3fc' : '#3f3f46' }}
+                      onClick={() => tog(col)}
+                    >
+                      {lbl}
+                      {sortCol === col ? (sortDir < 0 ? ' ↓' : ' ↑') : ''}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedRows.map((row, i) => {
+                  const isBest =
+                    sweepBest && row.temperature === sweepBest.temperature && row.horizon === sweepBest.horizon
+                  return (
+                    <tr
+                      key={i}
+                      onClick={() =>
+                        onUseInBacktest && onUseInBacktest({ temperature: row.temperature, horizon: row.horizon })
+                      }
+                      style={{
+                        background: isBest ? 'rgba(251,191,36,.04)' : 'transparent',
+                        borderLeft: isBest ? '2px solid rgba(251,191,36,.35)' : '2px solid transparent',
+                        cursor: onUseInBacktest ? 'pointer' : 'default',
+                      }}
+                    >
+                      <td style={{ ...td, color: '#71717a' }}>{row.temperature}</td>
+                      <td style={{ ...td, color: '#71717a' }}>{row.horizon}</td>
+                      <td style={{ ...td, color: '#52525b' }}>{row.n_valid}</td>
+                      <td
+                        style={{
+                          ...td,
+                          color: row.dir_acc != null && row.dir_acc > 0.58 ? '#4ade80' : '#e8e6e1',
+                          fontWeight: 600,
+                        }}
+                      >
+                        {row.dir_acc != null ? `${(row.dir_acc * 100).toFixed(1)}%` : '—'}
+                      </td>
+                      <td style={{ ...td, color: '#71717a' }}>{(row.mean_conf * 100).toFixed(1)}%</td>
+                      <td style={{ ...td, color: '#71717a' }}>{(row.top1_acc * 100).toFixed(1)}%</td>
+                      <td style={{ ...td, color: row.ece > 0.08 ? '#fb7185' : '#52525b' }}>{row.ece.toFixed(4)}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+    </div>
+    <PredictionHistorySection />
     </div>
   )
 }
 
-const inputStyle: React.CSSProperties = {
-  display: 'block', width: '100%', marginTop: 4,
-  background: '#0b0e13', color: 'var(--fg)',
-  border: '1px solid #1c2230', borderRadius: 4,
-  padding: '6px 10px', fontFamily: 'var(--font-mono)', fontSize: 13,
-  height: 32, boxSizing: 'border-box',
+// ---------- Prediction history (per-window log, ported from old History tab) -----
+
+interface HistoryItem {
+  idx: number
+  pred_ret: number
+  true_ret: number
+  correct: boolean
+  confidence: number
+  regime: number
 }
 
-function SweepHeatmap({
-  rows,
-  onPick,
-}: {
-  rows: SweepRow[]
-  onPick?: (seed: BacktestSeed) => void
-}) {
-  const temperatures = Array.from(new Set(rows.map(r => r.temperature))).sort((a, b) => a - b)
-  const horizons = Array.from(new Set(rows.map(r => r.horizon))).sort((a, b) => a - b)
-  const accs = rows.filter(r => r.dir_acc !== null).map(r => r.dir_acc as number)
-  const minAcc = accs.length ? Math.min(...accs) : 0
-  const maxAcc = accs.length ? Math.max(...accs) : 1
-  const denom = Math.max(1e-6, maxAcc - minAcc)
-  const cellColor = (acc: number | null) => {
-    if (acc === null) return '#1c2230'
-    const t = (acc - minAcc) / denom    // 0..1, 1 = best
-    // 0.5 = neutral gray; map onto a red→teal gradient with 0.5 anchored to no-skill.
-    const dist = Math.abs(acc - 0.5) * 2 // 0..1 from neutral
-    const isUp = acc > 0.5
-    const baseR = isUp ? 0  : 240
-    const baseG = isUp ? 212 : 82
-    const baseB = isUp ? 170 : 82
-    const a = Math.min(0.9, 0.15 + dist * 0.75)
-    return `rgba(${baseR}, ${baseG}, ${baseB}, ${a})`
+type HSortCol = keyof HistoryItem
+
+function PredictionHistorySection() {
+  const [windows, setWindows] = useState<HistoryItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+
+  const [sortCol, setSortCol] = useState<HSortCol>('idx')
+  const [sortDir, setSortDir] = useState<-1 | 1>(-1)
+  const [page, setPage] = useState(0)
+  const PAGE = 40
+
+  useEffect(() => {
+    fetchHistory(500)
+      .then(d => setWindows(d.windows ?? []))
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const sorted = useMemo(
+    () =>
+      [...windows].sort((a, b) => {
+        const av = a[sortCol]
+        const bv = b[sortCol]
+        const an = typeof av === 'boolean' ? Number(av) : (av as number)
+        const bn = typeof bv === 'boolean' ? Number(bv) : (bv as number)
+        return sortDir * (an - bn)
+      }),
+    [windows, sortCol, sortDir],
+  )
+  const totalP = Math.max(1, Math.ceil(sorted.length / PAGE))
+  const pageRows = sorted.slice(page * PAGE, (page + 1) * PAGE)
+  const tog = (col: HSortCol) => {
+    if (sortCol === col) setSortDir(d => (d === -1 ? 1 : -1))
+    else { setSortCol(col); setSortDir(-1); setPage(0) }
   }
+
+  if (loading) {
+    return (
+      <Panel style={{ padding: 16 }}>
+        <SLabel>Prediction History · loading…</SLabel>
+      </Panel>
+    )
+  }
+  if (error) {
+    return (
+      <Panel style={{ padding: 16 }}>
+        <SLabel>Prediction History</SLabel>
+        <div style={{ color: '#fb7185', fontSize: 9 }}>{error}</div>
+      </Panel>
+    )
+  }
+  if (!windows.length) {
+    return (
+      <Panel style={{ padding: 16 }}>
+        <SLabel>Prediction History</SLabel>
+        <div style={{ color: '#3f3f46', fontSize: 10 }}>
+          Run evaluation after training to populate this view.
+        </div>
+      </Panel>
+    )
+  }
+
+  const hitRate = windows.filter(w => w.correct).length / windows.length
+  const meanConf = windows.reduce((s, w) => s + w.confidence, 0) / windows.length
+  const meanPred = windows.reduce((s, w) => s + Math.abs(w.pred_ret), 0) / windows.length
+
+  const th: React.CSSProperties = {
+    fontSize: 8, letterSpacing: '.12em', textTransform: 'uppercase',
+    padding: '8px 12px', cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap', textAlign: 'left',
+  }
+  const td: React.CSSProperties = {
+    padding: '6px 12px', fontSize: 9,
+    fontFamily: "'JetBrains Mono',monospace",
+    borderBottom: '1px solid rgba(255,255,255,.022)',
+  }
+
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: 'auto' }}>
-        <thead>
-          <tr>
-            <th style={{ fontSize: 11, color: 'var(--fg-dim)', padding: '6px 10px', textAlign: 'right' }}>T \\ H →</th>
-            {horizons.map(h => (
-              <th key={h} style={{ fontSize: 12, fontFamily: 'var(--font-mono)', padding: '6px 10px', color: 'var(--fg-dim)' }}>{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {temperatures.map(T => (
-            <tr key={T}>
-              <td style={{ fontSize: 12, fontFamily: 'var(--font-mono)', padding: '6px 10px', color: 'var(--fg-dim)', textAlign: 'right' }}>{T}</td>
-              {horizons.map(H => {
-                const r = rows.find(x => x.temperature === T && x.horizon === H)
-                if (!r) return <td key={H} />
-                const acc = r.dir_acc
-                return (
-                  <td
-                    key={H}
-                    title={acc !== null ? `T=${T}, H=${H}\ndir_acc = ${(acc * 100).toFixed(2)}%\nn = ${r.n_valid}\ntop1 = ${(r.top1_acc * 100).toFixed(2)}%\nmean conf = ${(r.mean_conf * 100).toFixed(2)}%` : 'no data'}
-                    onClick={() => onPick && acc !== null && onPick({ temperature: T, horizon: H })}
-                    style={{
-                      padding: '8px 12px',
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 12,
-                      background: cellColor(acc),
-                      color: acc !== null && acc > 0.6 ? '#0b0e13' : 'var(--fg)',
-                      cursor: onPick && acc !== null ? 'pointer' : 'default',
-                      borderRadius: 3,
-                      textAlign: 'center',
-                      minWidth: 64,
-                    }}
-                  >
-                    {acc !== null ? `${(acc * 100).toFixed(1)}%` : '—'}
-                  </td>
-                )
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 6 }}>
-        Click any cell to send those settings to the Backtest tab. 50% = no directional skill; greener is better.
+    <Panel style={{ padding: 16, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 12, flexWrap: 'wrap' }}>
+        <SLabel style={{ marginBottom: 0 }}>Prediction History · per window</SLabel>
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="cgpt-ghost-btn"
+        >
+          {open ? '▾ hide log' : '▸ show log'}
+        </button>
       </div>
-    </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,minmax(0,1fr))', gap: 14, marginBottom: open ? 14 : 0 }}>
+        <MBox label="Rows" value={windows.length.toLocaleString()} />
+        <MBox
+          label="Hit Rate"
+          value={(hitRate * 100).toFixed(1) + '%'}
+          accent={hitRate > 0.5 ? '#4ade80' : '#fb7185'}
+          meter={hitRate}
+        />
+        <MBox label="Mean Conf" value={(meanConf * 100).toFixed(1) + '%'} meter={meanConf} />
+        <MBox label="Mean |Pred|" value={(meanPred * 10000).toFixed(1) + ' bps'} />
+      </div>
+      {open && (
+        <>
+          <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 460, borderTop: '1px solid rgba(255,255,255,.04)' }}>
+            <table>
+              <thead style={{ position: 'sticky', top: 0, background: 'rgba(12,12,14,.98)', backdropFilter: 'blur(8px)', zIndex: 2 }}>
+                <tr style={{ borderBottom: '1px solid rgba(255,255,255,.06)' }}>
+                  {([
+                    ['idx', '#'],
+                    ['pred_ret', 'Pred bps'],
+                    ['true_ret', 'Real bps'],
+                    ['correct', 'Hit'],
+                    ['confidence', 'Conf'],
+                    ['regime', 'Regime'],
+                  ] as Array<[HSortCol, string]>).map(([col, lbl]) => (
+                    <th
+                      key={col as string}
+                      style={{ ...th, color: sortCol === col ? '#7dd3fc' : '#3f3f46' }}
+                      onClick={() => tog(col)}
+                    >
+                      {lbl}
+                      {sortCol === col ? (sortDir < 0 ? ' ↓' : ' ↑') : ''}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pageRows.map(row => (
+                  <tr
+                    key={row.idx}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,.02)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    style={{ transition: 'background 80ms' }}
+                  >
+                    <td style={{ ...td, color: '#2a2a2e' }}>{row.idx}</td>
+                    <td style={{ ...td, color: row.pred_ret > 0 ? '#4ade80' : '#fb7185' }}>
+                      {(row.pred_ret * 10000).toFixed(1)}
+                    </td>
+                    <td style={{ ...td, color: row.true_ret > 0 ? '#4ade80' : '#fb7185' }}>
+                      {(row.true_ret * 10000).toFixed(1)}
+                    </td>
+                    <td style={td}>
+                      <span
+                        style={{
+                          display: 'inline-block', width: 5, height: 5,
+                          borderRadius: '50%',
+                          background: row.correct ? '#4ade80' : '#fb7185',
+                        }}
+                      />
+                    </td>
+                    <td style={{ ...td, color: '#52525b' }}>{(row.confidence * 100).toFixed(1)}%</td>
+                    <td style={{ ...td, color: '#52525b' }}>{row.regime}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div
+            style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              padding: '9px 4px 0', marginTop: 4, borderTop: '1px solid rgba(255,255,255,.04)',
+            }}
+          >
+            <span style={{ fontSize: 8, color: '#2a2a2e', letterSpacing: '.1em' }}>
+              {page * PAGE + 1}–{Math.min((page + 1) * PAGE, sorted.length)} of {sorted.length}
+            </span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {([
+                ['← prev', page > 0, () => setPage(p => p - 1)],
+                ['next →', page < totalP - 1, () => setPage(p => p + 1)],
+              ] as Array<[string, boolean, () => void]>).map(([lbl, en, fn]) => (
+                <button
+                  key={lbl}
+                  onClick={fn}
+                  disabled={!en}
+                  style={{
+                    padding: '3px 9px', borderRadius: 6,
+                    fontSize: 8, fontWeight: 600, letterSpacing: '.1em',
+                    background: 'transparent',
+                    border: '1px solid rgba(255,255,255,.06)',
+                    color: en ? '#52525b' : '#2a2a2e',
+                    cursor: en ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </Panel>
   )
 }

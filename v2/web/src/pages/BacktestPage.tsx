@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import { createChart, type IChartApi, LineSeries } from 'lightweight-charts'
-import { runBacktest, getEvalHistory } from '../api'
+import { useEffect, useState } from 'react'
+import { runBacktest, getEvalHistory, fetchEquity } from '../api'
+import { Panel, SLabel, Divider, MBox, Pill } from '../components/dash'
 
 export interface BacktestSeed {
   temperature: number
@@ -37,43 +37,147 @@ interface BacktestResult {
   error?: string
 }
 
-const STRATEGIES: { id: string; label: string; description: string }[] = [
-  { id: 'spot',          label: 'Spot long/short', description: 'Long if z > threshold, short if z < −threshold. PnL = ±actual cumulative log return − fee.' },
-  { id: 'long_call',     label: 'Long ATM calls (bullish only)', description: 'Buy an ATM call when z > threshold. PnL = max(0, ΔS) − premium.' },
-  { id: 'long_put',      label: 'Long ATM puts (bearish only)',  description: 'Buy an ATM put when z < −threshold. PnL = max(0, −ΔS) − premium.' },
-  { id: 'long_straddle', label: 'Long ATM straddle (volatility)', description: 'Buy a call + put when |z| > threshold. PnL = |ΔS| − 2×premium. Profits on big moves either way.' },
+const STRATEGIES: { id: string; label: string }[] = [
+  { id: 'spot', label: 'spot' },
+  { id: 'long_call', label: 'long_call' },
+  { id: 'long_put', label: 'long_put' },
+  { id: 'long_straddle', label: 'straddle' },
 ]
 
-const inputStyle: React.CSSProperties = {
-  display: 'block', width: '100%', marginTop: 4,
-  background: '#0b0e13', color: 'var(--fg)',
-  border: '1px solid #1c2230', borderRadius: 4,
-  padding: '6px 10px', fontFamily: 'var(--font-mono)', fontSize: 13,
-  height: 32, boxSizing: 'border-box',
+// ---------- inline equity SVG (ported from prototype) -------------------
+
+function EqChart({ data, W = 620, H = 180 }: { data: EquityPoint[]; W?: number; H?: number }) {
+  const [tip, setTip] = useState<{ i: number; x: number } | null>(null)
+  if (!data.length) return null
+  const values = data.map(d => d.cum_ret_pct / 100 + 1) // normalize to 1.0 base for shading
+  const minV = Math.min(...values)
+  const maxV = Math.max(...values)
+  const rng = Math.max(maxV - minV, 1e-6)
+  const n = data.length
+  const px = (i: number) => (i / Math.max(1, n - 1)) * (W - 36) + 16
+  const py = (v: number) => H - 26 - ((v - minV) / rng) * (H - 42)
+  const line = values.map((v, i) => `${i === 0 ? 'M' : 'L'}${px(i).toFixed(1)},${py(v).toFixed(1)}`).join(' ')
+  const area = `${line} L${px(n - 1)},${H - 26} L${px(0)},${H - 26} Z`
+  return (
+    <div style={{ position: 'relative' }}>
+      <svg
+        width="100%"
+        height={H}
+        viewBox={`0 0 ${W} ${H}`}
+        style={{ overflow: 'visible' }}
+        onMouseMove={e => {
+          const r = e.currentTarget.getBoundingClientRect()
+          const rx = ((e.clientX - r.left) / r.width) * W
+          const i = Math.round(((rx - 16) / (W - 36)) * (n - 1))
+          if (i >= 0 && i < n) setTip({ i, x: rx })
+        }}
+        onMouseLeave={() => setTip(null)}
+      >
+        <defs>
+          <linearGradient id="eqG" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#38bdf8" stopOpacity=".12" />
+            <stop offset="100%" stopColor="#38bdf8" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        {(() => {
+          let pk = values[0]
+          return values.map((v, i) => {
+            if (v > pk) pk = v
+            const ddH = ((pk - v) / rng) * (H - 42)
+            if (ddH < 2) return null
+            return (
+              <rect
+                key={i}
+                x={px(i)}
+                y={py(pk)}
+                width={W / n + 0.5}
+                height={ddH}
+                fill="rgba(251,113,133,.07)"
+              />
+            )
+          })
+        })()}
+        <line
+          x1={16}
+          x2={W - 20}
+          y1={py(1)}
+          y2={py(1)}
+          stroke="rgba(255,255,255,.08)"
+          strokeWidth="1"
+          strokeDasharray="3 3"
+        />
+        <path d={area} fill="url(#eqG)" />
+        <path d={line} fill="none" stroke="#38bdf8" strokeWidth="1.5" strokeLinejoin="round" />
+        {[minV, 1, maxV].map((v, i) => (
+          <text
+            key={i}
+            x={W - 18}
+            y={py(v) + 3}
+            fontSize="8"
+            fill="#3f3f46"
+            fontFamily="'JetBrains Mono',monospace"
+            textAnchor="end"
+          >
+            {((v - 1) * 100 >= 0 ? '+' : '') + ((v - 1) * 100).toFixed(1)}%
+          </text>
+        ))}
+        {tip && (
+          <>
+            <line
+              x1={tip.x}
+              x2={tip.x}
+              y1={8}
+              y2={H - 26}
+              stroke="#fbbf24"
+              strokeWidth="1"
+              strokeDasharray="2 4"
+              opacity=".4"
+            />
+            <circle cx={tip.x} cy={py(values[tip.i])} r="2.5" fill="#38bdf8" />
+          </>
+        )}
+      </svg>
+      {tip && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 6,
+            left: Math.min(tip.x + 8, W - 140),
+            background: 'rgba(12,12,14,.97)',
+            border: '1px solid rgba(255,255,255,.08)',
+            borderRadius: 8,
+            padding: '5px 9px',
+            fontSize: 9,
+            lineHeight: 1.7,
+            fontFamily: "'JetBrains Mono',monospace",
+            pointerEvents: 'none',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          <div style={{ color: '#52525b' }}>trade {tip.i}</div>
+          <div style={{ color: '#38bdf8' }}>cum return {data[tip.i].cum_ret_pct.toFixed(2)}%</div>
+        </div>
+      )}
+    </div>
+  )
 }
 
+// ---------- BacktestPage --------------------------------------------------
+
 export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
+  const [strat, setStrat] = useState('spot')
   const [temperature, setTemperature] = useState(1.0)
   const [horizon, setHorizon] = useState(30)
-  // Default 0 — current CandleGPT checkpoints usually emit small z-scores,
-  // so a high threshold can filter out every window. Start at 0 (always-on)
-  // and dial up to find a confidence threshold that actually fires.
   const [zThreshold, setZThreshold] = useState(0.0)
   const [feeBps, setFeeBps] = useState(0.0)
+  const [annualizedVol, setAnnualizedVol] = useState(0.6)
   const [startFrac, setStartFrac] = useState(0)
   const [endFrac, setEndFrac] = useState(1)
-  const [strategy, setStrategy] = useState('spot')
-  const [annualizedVol, setAnnualizedVol] = useState(0.6)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [elapsedMs, setElapsedMs] = useState<number | null>(null)
 
-  const chartRef = useRef<HTMLDivElement>(null)
-  const chart = useRef<IChartApi | null>(null)
-  const series = useRef<any>(null)
-
-  // Apply settings handed over from Calibration sweep.
   useEffect(() => {
     if (seed) {
       setTemperature(seed.temperature)
@@ -81,49 +185,26 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
     }
   }, [seed])
 
-  useEffect(() => {
-    if (!chartRef.current) return
-    const c = createChart(chartRef.current, {
-      layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
-      grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
-      rightPriceScale: { borderColor: '#252d3d' },
-      timeScale: { borderColor: '#252d3d', timeVisible: false },
-      width: chartRef.current.clientWidth,
-      height: 300,
-    })
-    const s = c.addSeries(LineSeries, { color: '#00d4aa', lineWidth: 2, title: 'cumulative return %' })
-    chart.current = c
-    series.current = s
-    const ro = new ResizeObserver(() => {
-      if (chartRef.current) c.resize(chartRef.current.clientWidth, 300)
-    })
-    ro.observe(chartRef.current)
-    return () => { ro.disconnect(); c.remove() }
-  }, [])
-
-  const renderEquity = (eq: EquityPoint[]) => {
-    if (!series.current) return
-    const data = eq.map((p, i) => ({ time: (i + 1) as any, value: p.cum_ret_pct }))
-    series.current.setData(data)
-    chart.current?.timeScale().fitContent()
-  }
-
   const doRun = async () => {
     setRunning(true)
     setError(null)
     const t0 = performance.now()
     try {
       const res = await runBacktest({
-        temperature, horizon, z_threshold: zThreshold,
-        start_frac: startFrac, end_frac: endFrac, fee_bps: feeBps,
-        strategy, annualized_vol: annualizedVol,
+        temperature,
+        horizon,
+        z_threshold: zThreshold,
+        start_frac: startFrac,
+        end_frac: endFrac,
+        fee_bps: feeBps,
+        strategy: strat,
+        annualized_vol: annualizedVol,
       })
       if (res.error) {
         setError(res.error)
         setResult(null)
       } else {
         setResult(res)
-        renderEquity(res.equity)
       }
       setElapsedMs(Math.round(performance.now() - t0))
     } catch (e: any) {
@@ -133,136 +214,314 @@ export function BacktestPage({ seed }: { seed: BacktestSeed | null }) {
     }
   }
 
+  const fmt = (n: number, d = 2) => (n % 1 === 0 ? n.toString() : n.toFixed(d))
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div className="card">
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-          Backtest the predictor on the held-out test set
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--fg-dim)', marginBottom: 14, lineHeight: 1.5 }}>
-          For each test window, applies <strong>temperature</strong> to the model's logits, computes the
-          standardized expected return over <strong>horizon</strong> bars, then takes a long if z &gt; threshold,
-          short if z &lt; −threshold, otherwise flat. PnL is the actual cumulative log return over the
-          horizon, minus 2 × fee on round-trip.
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 12, padding: '8px 12px', background: '#0e1620', border: '1px solid #1c2230', borderRadius: 4 }}>
-          <strong style={{ color: 'var(--fg)' }}>Heads up:</strong> current CandleGPT checkpoints usually emit small z-scores.
-          Use <code style={{ fontFamily: 'var(--font-mono)', color: '#00d4aa' }}>z_threshold = 0</code> to take a position on every window, then dial up to filter for higher-conviction signals.
-          If trades drop to zero, lower the threshold or shorten the horizon.
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', gap: 12, alignItems: 'end', marginBottom: 12 }}>
-          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
+    <div className="cgpt-bt-layout">
+      {/* Params */}
+      <Panel style={{ padding: 16 }}>
+        <SLabel>Parameters</SLabel>
+        <div style={{ marginBottom: 12 }}>
+          <div
+            style={{
+              fontSize: 8,
+              letterSpacing: '.15em',
+              textTransform: 'uppercase',
+              color: '#52525b',
+              marginBottom: 6,
+            }}
+          >
             Strategy
-            <select
-              value={strategy}
-              onChange={e => setStrategy(e.target.value)}
-              style={{ ...inputStyle, padding: '6px 10px' }}
-            >
-              {STRATEGIES.map(s => (
-                <option key={s.id} value={s.id}>{s.label}</option>
-              ))}
-            </select>
-          </label>
-          {strategy !== 'spot' && (
-            <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-              Annualized vol (for premium)
-              <input type="number" step={0.05} min={0.01} value={annualizedVol} onChange={e => setAnnualizedVol(parseFloat(e.target.value) || 0.6)} style={inputStyle} />
-            </label>
-          )}
-          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            Temperature
-            <input type="number" step={0.1} min={0.1} value={temperature} onChange={e => setTemperature(parseFloat(e.target.value) || 1)} style={inputStyle} />
-          </label>
-          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            Horizon (bars)
-            <input type="number" min={1} max={500} value={horizon} onChange={e => setHorizon(parseInt(e.target.value, 10) || 30)} style={inputStyle} />
-          </label>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {STRATEGIES.map(s => (
+              <button
+                key={s.id}
+                onClick={() => setStrat(s.id)}
+                style={{
+                  textAlign: 'left',
+                  padding: '5px 10px',
+                  borderRadius: 7,
+                  fontSize: 9,
+                  fontWeight: 700,
+                  letterSpacing: '.08em',
+                  textTransform: 'uppercase',
+                  border: strat === s.id ? '1px solid rgba(125,211,252,.25)' : '1px solid transparent',
+                  background: strat === s.id ? 'rgba(125,211,252,.05)' : 'transparent',
+                  color: strat === s.id ? '#7dd3fc' : '#52525b',
+                  cursor: 'pointer',
+                  transition: 'all 150ms',
+                }}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr) auto', gap: 12, alignItems: 'end' }}>
-          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            z threshold
-            <input type="number" step={0.01} min={0} value={zThreshold} onChange={e => setZThreshold(parseFloat(e.target.value) || 0)} style={inputStyle} />
-          </label>
-          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            Fee (bps)
-            <input type="number" step={0.1} min={0} value={feeBps} onChange={e => setFeeBps(parseFloat(e.target.value) || 0)} style={inputStyle} />
-          </label>
-          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            Start frac
-            <input type="number" step={0.05} min={0} max={1} value={startFrac} onChange={e => setStartFrac(parseFloat(e.target.value) || 0)} style={inputStyle} />
-          </label>
-          <label style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            End frac
-            <input type="number" step={0.05} min={0} max={1} value={endFrac} onChange={e => setEndFrac(parseFloat(e.target.value) || 1)} style={inputStyle} />
-          </label>
-          <button onClick={doRun} disabled={running} style={{ height: 32 }}>
-            {running ? 'Running…' : 'Run backtest'}
-          </button>
-        </div>
-        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--fg-dim)' }}>
-          {STRATEGIES.find(s => s.id === strategy)?.description}
-        </div>
-        {error && <div style={{ color: 'var(--red)', fontSize: 12, marginTop: 10 }}>{error}</div>}
+        <Divider />
+        {([
+          ['Temperature', temperature, setTemperature, 0.1, 3, 0.1],
+          ['Horizon', horizon, setHorizon, 1, 200, 1],
+          ['Z-Threshold', zThreshold, setZThreshold, 0, 3, 0.1],
+          ['Fee bps', feeBps, setFeeBps, 0, 50, 0.5],
+          ['Ann. Vol', annualizedVol, setAnnualizedVol, 0.1, 2, 0.05],
+          ['Start frac', startFrac, setStartFrac, 0, 1, 0.05],
+          ['End frac', endFrac, setEndFrac, 0, 1, 0.05],
+        ] as Array<[string, number, (v: number) => void, number, number, number]>).map(
+          ([lbl, val, set, mn, mx, st]) => (
+            <div key={lbl} style={{ marginBottom: 11 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  fontSize: 8,
+                  color: '#52525b',
+                  letterSpacing: '.12em',
+                  textTransform: 'uppercase',
+                  marginBottom: 4,
+                }}
+              >
+                <span>{lbl}</span>
+                <span style={{ color: '#71717a', fontFamily: "'JetBrains Mono',monospace" }}>{fmt(val)}</span>
+              </div>
+              <input
+                type="range"
+                min={mn}
+                max={mx}
+                step={st}
+                value={val}
+                onChange={e => set(Number(e.target.value))}
+              />
+            </div>
+          ),
+        )}
+        <button
+          onClick={doRun}
+          disabled={running}
+          style={{
+            width: '100%',
+            padding: '9px 0',
+            borderRadius: 10,
+            marginTop: 4,
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: '.15em',
+            textTransform: 'uppercase',
+            background: running ? 'rgba(56,189,248,.05)' : 'rgba(56,189,248,.09)',
+            color: running ? '#52525b' : '#7dd3fc',
+            border: '1px solid rgba(56,189,248,.18)',
+            cursor: running ? 'not-allowed' : 'pointer',
+            transition: 'all 200ms',
+          }}
+        >
+          {running ? '— running —' : '→ run backtest'}
+        </button>
         {seed && (
-          <div style={{ marginTop: 10, fontSize: 11, color: 'var(--fg-dim)' }}>
-            Loaded T={seed.temperature}, H={seed.horizon} from Calibration sweep.
+          <div style={{ marginTop: 8, fontSize: 8, color: '#52525b', letterSpacing: '.1em' }}>
+            seed T={seed.temperature}, H={seed.horizon}
           </div>
         )}
-      </div>
-
-      {/* Stats row — always visible so the user can see what came back, even before they hit Run */}
-      {result && (
-        <div className="card">
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12 }}>
-            <Stat label="Trades" value={result.trades.toString()} />
-            <Stat
-              label={
-                result.strategy === 'long_straddle'
-                  ? 'Straddles / Flats'
-                  : result.strategy === 'long_call'
-                    ? 'Calls / Flats'
-                    : result.strategy === 'long_put'
-                      ? 'Puts / Flats'
-                      : 'Longs / Shorts / Flats'
-              }
-              value={
-                result.strategy === 'long_straddle'
-                  ? `${result.straddles ?? 0} / ${result.flats}`
-                  : result.strategy === 'long_call'
-                    ? `${result.longs} / ${result.flats}`
-                    : result.strategy === 'long_put'
-                      ? `${result.shorts} / ${result.flats}`
-                      : `${result.longs} / ${result.shorts} / ${result.flats}`
-              }
-            />
-            <Stat label="Win rate" value={`${(result.win_rate * 100).toFixed(1)}%`} color={result.win_rate > 0.5 ? '#00d4aa' : '#f5a623'} />
-            <Stat label="Total return" value={`${result.total_return_pct >= 0 ? '+' : ''}${result.total_return_pct.toFixed(2)}%`} color={result.total_return_pct >= 0 ? '#00d4aa' : '#f05252'} />
-            <Stat label="Sharpe / trade" value={result.sharpe_per_trade.toFixed(3)} />
-            <Stat label="Max drawdown" value={`${result.max_drawdown_pct.toFixed(2)}%`} color="#f05252" />
+        {error && (
+          <div style={{ color: '#fb7185', fontSize: 9, marginTop: 8 }}>{error}</div>
+        )}
+        {elapsedMs !== null && !error && (
+          <div style={{ marginTop: 8, fontSize: 8, color: '#3f3f46', letterSpacing: '.1em' }}>
+            {(elapsedMs / 1000).toFixed(2)}s elapsed
           </div>
-          <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginTop: 10, lineHeight: 1.6 }}>
-            Strategy: <span style={{ color: 'var(--fg)', fontFamily: 'var(--font-mono)' }}>{result.strategy}</span>
-            {' · '}
-            Run on {result.n_windows} windows · T={result.temperature}, H={result.horizon}, z≥{result.z_threshold}, fee={result.fee_bps} bps
-            {result.strategy !== 'spot' && (
-              <> · σ={result.annualized_vol.toFixed(2)} → ATM premium <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--fg)' }}>{result.atm_premium_pct.toFixed(3)}%</span></>
-            )}
-            {elapsedMs !== null && ` · ${(elapsedMs / 1000).toFixed(2)}s`}
-          </div>
-        </div>
-      )}
+        )}
+      </Panel>
 
-      <div className="card">
-        <div style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-          Equity curve — cumulative return %
-        </div>
-        <div ref={chartRef} style={{ width: '100%' }} />
+      {/* Results */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {result ? (
+          <>
+            <Panel style={{ padding: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <SLabel>Results</SLabel>
+                <Pill>
+                  {result.n_windows.toLocaleString()} windows · T={result.temperature} · H={result.horizon}
+                </Pill>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 14 }}>
+                <MBox
+                  label="Total Return"
+                  value={(result.total_return_pct >= 0 ? '+' : '') + result.total_return_pct.toFixed(2) + '%'}
+                  accent={result.total_return_pct >= 0 ? '#4ade80' : '#fb7185'}
+                />
+                <MBox
+                  label="Win Rate"
+                  value={(result.win_rate * 100).toFixed(1) + '%'}
+                  meter={result.win_rate}
+                />
+                <MBox label="Sharpe / trade" value={result.sharpe_per_trade.toFixed(3)} />
+                <MBox
+                  label="Max DD"
+                  value={'-' + result.max_drawdown_pct.toFixed(2) + '%'}
+                  accent="#fb7185"
+                />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
+                <MBox label="Trades" value={result.trades.toLocaleString()} />
+                <MBox label="Longs" value={result.longs.toLocaleString()} accent="#4ade80" />
+                <MBox label="Shorts" value={result.shorts.toLocaleString()} accent="#fb7185" />
+                <MBox label="Flats" value={result.flats.toLocaleString()} />
+              </div>
+              {result.strategy !== 'spot' && (
+                <div style={{ fontSize: 9, color: '#52525b', marginTop: 10, letterSpacing: '.08em' }}>
+                  σ={result.annualized_vol.toFixed(2)} → ATM premium {result.atm_premium_pct.toFixed(3)}% · fee {result.fee_bps} bps
+                </div>
+              )}
+            </Panel>
+            <Panel style={{ padding: 16 }}>
+              <SLabel>Equity Curve</SLabel>
+              <EqChart data={result.equity} W={620} H={180} />
+            </Panel>
+          </>
+        ) : (
+          <CheckpointEquityPanel />
+        )}
+        <EvalHistorySection />
       </div>
-
-      <EvalHistorySection />
     </div>
   )
 }
+
+// ---------- Loaded-checkpoint equity (formerly the standalone Equity tab) ------
+
+interface CkptEquityPoint { idx: number; cumret: number; position: number }
+
+function CheckpointEquityPanel() {
+  const [data, setData] = useState<{ equity: CkptEquityPoint[]; sharpe: number; max_dd: number } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetchEquity()
+      .then(d => setData(d))
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
+
+  if (loading) {
+    return (
+      <Panel style={{ padding: 24 }}>
+        <SLabel>Loaded Checkpoint · Eval Equity</SLabel>
+        <div style={{ color: '#3f3f46', fontSize: 10 }}>Loading…</div>
+      </Panel>
+    )
+  }
+
+  if (error || !data?.equity?.length) {
+    return (
+      <Panel style={{ padding: 32, textAlign: 'center' }}>
+        <div
+          className="float-hint"
+          style={{
+            fontSize: 9, color: '#2a2a2e',
+            letterSpacing: '.15em', textTransform: 'uppercase',
+          }}
+        >
+          Configure parameters and run backtest
+        </div>
+        <div style={{ marginTop: 8, fontSize: 8, color: '#3f3f46', letterSpacing: '.1em' }}>
+          {error
+            ? 'No checkpoint equity available'
+            : 'Or load a trained checkpoint to see its baseline eval equity here'}
+        </div>
+      </Panel>
+    )
+  }
+
+  // Render checkpoint equity inline (mini version of the old EquityPage chart).
+  const curve = data.equity.map((e, i) => ({ t: i, v: 1 + e.cumret }))
+  const finalCumret = data.equity[data.equity.length - 1]?.cumret ?? 0
+  const minV = Math.min(...curve.map(d => d.v))
+  const maxV = Math.max(...curve.map(d => d.v))
+  const rng = Math.max(maxV - minV, 1e-6)
+  const n = curve.length
+  const W = 720
+  const H = 180
+  const pL = 16, pR = 52, pT = 16, pB = 26
+  const px = (i: number) => pL + (i / Math.max(1, n - 1)) * (W - pL - pR)
+  const py = (v: number) => pT + (H - pT - pB) - ((v - minV) / rng) * (H - pT - pB)
+  const line = curve.map((d, i) => `${i === 0 ? 'M' : 'L'}${px(i).toFixed(1)},${py(d.v).toFixed(1)}`).join(' ')
+
+  let peak = 0, maxDD = 0
+  for (const p of curve) {
+    if (p.v > peak) peak = p.v
+    const dd = peak > 0 ? (peak - p.v) / peak : 0
+    if (dd > maxDD) maxDD = dd
+  }
+  const totalRet = finalCumret * 100
+  const peakRet = (maxV - 1) * 100
+
+  return (
+    <Panel style={{ padding: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 12, flexWrap: 'wrap' }}>
+        <SLabel style={{ marginBottom: 0 }}>Loaded Checkpoint · Eval Equity</SLabel>
+        <Pill>baseline · z=0 spot</Pill>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,minmax(0,1fr))', gap: 12, marginBottom: 14 }}>
+        <MBox
+          label="Total Return"
+          value={(totalRet >= 0 ? '+' : '') + totalRet.toFixed(2) + '%'}
+          accent={totalRet >= 0 ? '#4ade80' : '#fb7185'}
+        />
+        <MBox label="Max DD" value={'-' + (data.max_dd * 100).toFixed(2) + '%'} accent="#fb7185" />
+        <MBox label="Peak" value={`+${peakRet.toFixed(2)}%`} accent="#7dd3fc" />
+        <MBox label="Sharpe" value={data.sharpe.toFixed(2)} accent={data.sharpe > 0 ? '#4ade80' : '#fb7185'} />
+      </div>
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{ overflow: 'visible' }} preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="ckptEqLG" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#38bdf8" stopOpacity=".16" />
+            <stop offset="100%" stopColor="#38bdf8" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        {(() => {
+          let pk = curve[0].v
+          return curve.map((d, i) => {
+            if (d.v > pk) pk = d.v
+            const ddH = ((pk - d.v) / rng) * (H - pT - pB)
+            if (ddH < 2) return null
+            return (
+              <rect
+                key={i}
+                x={px(i)} y={py(pk)}
+                width={(W - pL - pR) / Math.max(1, n - 1) + 0.5}
+                height={ddH}
+                fill="rgba(251,113,133,.07)"
+              />
+            )
+          })
+        })()}
+        <line
+          x1={pL} x2={W - pR} y1={py(1)} y2={py(1)}
+          stroke="rgba(255,255,255,.08)" strokeWidth="1" strokeDasharray="3 3"
+        />
+        <path d={`${line} L${px(n - 1)},${py(minV)} L${px(0)},${py(minV)} Z`} fill="url(#ckptEqLG)" />
+        <path d={line} fill="none" stroke="#38bdf8" strokeWidth="1.5" strokeLinejoin="round" />
+        {[minV, 1, maxV].map((v, i) => (
+          <text
+            key={i}
+            x={W - pR + 6}
+            y={py(v) + 3}
+            fontSize="8"
+            fill="#3f3f46"
+            fontFamily="'JetBrains Mono',monospace"
+          >
+            {((v - 1) * 100 >= 0 ? '+' : '') + ((v - 1) * 100).toFixed(1)}%
+          </text>
+        ))}
+      </svg>
+      <div style={{ marginTop: 8, fontSize: 8, color: '#3f3f46', letterSpacing: '.08em', lineHeight: 1.7 }}>
+        Saved-eval baseline from the loaded inference checkpoint. Computed peak DD {(maxDD * 100).toFixed(2)}%. Run a backtest above with custom parameters to overlay results.
+      </div>
+    </Panel>
+  )
+}
+
+// ---------- Eval history (real API) -------------------------------------
 
 interface HistoryEntry {
   ts: number
@@ -279,61 +538,37 @@ interface HistoryEntry {
   }
 }
 
+function MiniLine({
+  data,
+  color,
+  W = 280,
+  H = 70,
+}: {
+  data: number[]
+  color: string
+  W?: number
+  H?: number
+}) {
+  if (!data.length) return <div style={{ height: H, color: '#3f3f46', fontSize: 9 }}>no data</div>
+  const minV = Math.min(...data)
+  const maxV = Math.max(...data)
+  const rng = Math.max(maxV - minV, 1e-9)
+  const n = data.length
+  const px = (i: number) => 6 + (i / Math.max(1, n - 1)) * (W - 12)
+  const py = (v: number) => 6 + (1 - (v - minV) / rng) * (H - 12)
+  const d = data.map((v, i) => `${i === 0 ? 'M' : 'L'}${px(i).toFixed(1)},${py(v).toFixed(1)}`).join(' ')
+  return (
+    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{ overflow: 'visible' }}>
+      <path d={d} fill="none" stroke={color} strokeWidth="1.5" />
+    </svg>
+  )
+}
+
 function EvalHistorySection() {
   const [entries, setEntries] = useState<HistoryEntry[]>([])
   const [runId, setRunId] = useState<string | null>(null)
   const [available, setAvailable] = useState(true)
 
-  const accRef = useRef<HTMLDivElement>(null)
-  const accChart = useRef<IChartApi | null>(null)
-  const accSeries = useRef<any>(null)
-
-  const winRef = useRef<HTMLDivElement>(null)
-  const winChart = useRef<IChartApi | null>(null)
-  const winSeries = useRef<any>(null)
-
-  const retRef = useRef<HTMLDivElement>(null)
-  const retChart = useRef<IChartApi | null>(null)
-  const retSeries = useRef<any>(null)
-
-  const sharpeRef = useRef<HTMLDivElement>(null)
-  const sharpeChart = useRef<IChartApi | null>(null)
-  const sharpeSeries = useRef<any>(null)
-
-  // Build the four small charts once.
-  useEffect(() => {
-    const setup = (
-      ref: React.RefObject<HTMLDivElement | null>,
-      chartRef: React.MutableRefObject<IChartApi | null>,
-      seriesRef: React.MutableRefObject<any>,
-      color: string,
-    ) => {
-      if (!ref.current) return
-      const c = createChart(ref.current, {
-        layout: { background: { color: '#0b0e13' }, textColor: '#8492a6' },
-        grid: { vertLines: { color: '#1c2230' }, horzLines: { color: '#1c2230' } },
-        rightPriceScale: { borderColor: '#252d3d' },
-        timeScale: { borderColor: '#252d3d', timeVisible: false },
-        width: ref.current.clientWidth,
-        height: 160,
-      })
-      const s = c.addSeries(LineSeries, { color, lineWidth: 2, lastValueVisible: false, priceLineVisible: false })
-      chartRef.current = c
-      seriesRef.current = s
-      const ro = new ResizeObserver(() => {
-        if (ref.current) c.resize(ref.current.clientWidth, 160)
-      })
-      ro.observe(ref.current)
-      return () => { ro.disconnect(); c.remove() }
-    }
-    const off1 = setup(accRef, accChart, accSeries, '#00d4aa')
-    const off2 = setup(winRef, winChart, winSeries, '#4a90e2')
-    const off3 = setup(retRef, retChart, retSeries, '#f5a623')
-    const off4 = setup(sharpeRef, sharpeChart, sharpeSeries, '#9b59b6')
-    return () => { off1?.(); off2?.(); off3?.(); off4?.() }
-  }, [])
-
-  // Poll history every 30s.
   useEffect(() => {
     let cancelled = false
     const load = async () => {
@@ -345,15 +580,6 @@ function EvalHistorySection() {
         const items: HistoryEntry[] = res.entries ?? []
         items.sort((a, b) => a.step - b.step)
         setEntries(items)
-        const x = (e: HistoryEntry) => (e.step + 1) as any
-        accSeries.current?.setData(items.filter(e => e.best_dir_acc !== null).map(e => ({ time: x(e), value: (e.best_dir_acc as number) * 100 })))
-        winSeries.current?.setData(items.map(e => ({ time: x(e), value: e.backtest.win_rate * 100 })))
-        retSeries.current?.setData(items.map(e => ({ time: x(e), value: e.backtest.total_return_pct })))
-        sharpeSeries.current?.setData(items.map(e => ({ time: x(e), value: e.backtest.sharpe_per_trade })))
-        accChart.current?.timeScale().fitContent()
-        winChart.current?.timeScale().fitContent()
-        retChart.current?.timeScale().fitContent()
-        sharpeChart.current?.timeScale().fitContent()
       } catch { /* ignore */ }
     }
     load()
@@ -362,61 +588,64 @@ function EvalHistorySection() {
   }, [])
 
   const latest = entries[entries.length - 1]
-  const first = entries[0]
 
   return (
-    <div className="card">
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
-        <span style={{ fontSize: 11, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Progress over time — auto-evaluated each new training checkpoint
-        </span>
-        {runId && <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--fg-dim)' }}>{runId}</span>}
-        {entries.length > 0 && (
-          <span style={{ fontSize: 11, color: 'var(--fg-dim)', marginLeft: 'auto' }}>
-            {entries.length} checkpoint{entries.length === 1 ? '' : 's'} evaluated · steps {first?.step.toLocaleString()} → {latest?.step.toLocaleString()}
-          </span>
-        )}
+    <Panel style={{ padding: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <SLabel>Eval History · auto per checkpoint</SLabel>
+        {runId && <Pill>{runId}</Pill>}
       </div>
       {!available && (
-        <div style={{ fontSize: 12, color: 'var(--fg-dim)' }}>
-          No eval history yet. Run <code style={{ fontFamily: 'var(--font-mono)' }}>v2.train.poll_eval</code> alongside training to populate.
+        <div style={{ fontSize: 9, color: '#3f3f46' }}>
+          No eval history yet. Run <code style={{ color: '#7dd3fc' }}>v2.train.poll_eval</code> alongside training.
         </div>
       )}
       {available && entries.length === 0 && (
-        <div style={{ fontSize: 12, color: 'var(--fg-dim)' }}>
-          Watching for the first checkpoint — typically lands ~30 min into a fresh run.
+        <div style={{ fontSize: 9, color: '#3f3f46' }}>
+          Watching for the first checkpoint…
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        <MiniPanel label="Best directional accuracy %" color="#00d4aa" innerRef={accRef} latest={latest && latest.best_dir_acc !== null ? `${(latest.best_dir_acc * 100).toFixed(1)}%` : '—'} />
-        <MiniPanel label="Backtest win rate %" color="#4a90e2" innerRef={winRef} latest={latest ? `${(latest.backtest.win_rate * 100).toFixed(1)}%` : '—'} />
-        <MiniPanel label="Backtest total return %" color="#f5a623" innerRef={retRef} latest={latest ? `${latest.backtest.total_return_pct >= 0 ? '+' : ''}${latest.backtest.total_return_pct.toFixed(2)}%` : '—'} />
-        <MiniPanel label="Backtest Sharpe / trade" color="#9b59b6" innerRef={sharpeRef} latest={latest ? latest.backtest.sharpe_per_trade.toFixed(3) : '—'} />
-      </div>
-    </div>
-  )
-}
-
-function MiniPanel({ label, color, innerRef, latest }: { label: string; color: string; innerRef: React.RefObject<HTMLDivElement | null>; latest: string }) {
-  return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-        <span style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-          <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: color, marginRight: 6 }} />
-          {label}
-        </span>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color }}>{latest}</span>
-      </div>
-      <div ref={innerRef} style={{ width: '100%' }} />
-    </div>
-  )
-}
-
-function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div>
-      <div style={{ fontSize: 10, color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
-      <div style={{ fontSize: 18, fontFamily: 'var(--font-mono)', color: color ?? 'var(--fg)', marginTop: 2 }}>{value}</div>
-    </div>
+      {entries.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14 }}>
+          <div>
+            <MBox
+              label="Best Dir Acc"
+              value={latest && latest.best_dir_acc != null ? `${(latest.best_dir_acc * 100).toFixed(1)}%` : '—'}
+              accent="#4ade80"
+            />
+            <MiniLine
+              data={entries
+                .filter(e => e.best_dir_acc !== null)
+                .map(e => (e.best_dir_acc as number) * 100)}
+              color="#4ade80"
+            />
+          </div>
+          <div>
+            <MBox
+              label="Win Rate"
+              value={latest ? `${(latest.backtest.win_rate * 100).toFixed(1)}%` : '—'}
+              accent="#7dd3fc"
+            />
+            <MiniLine data={entries.map(e => e.backtest.win_rate * 100)} color="#7dd3fc" />
+          </div>
+          <div>
+            <MBox
+              label="Total Return"
+              value={latest ? `${latest.backtest.total_return_pct >= 0 ? '+' : ''}${latest.backtest.total_return_pct.toFixed(2)}%` : '—'}
+              accent="#fbbf24"
+            />
+            <MiniLine data={entries.map(e => e.backtest.total_return_pct)} color="#fbbf24" />
+          </div>
+          <div>
+            <MBox
+              label="Sharpe / trade"
+              value={latest ? latest.backtest.sharpe_per_trade.toFixed(3) : '—'}
+              accent="#c084fc"
+            />
+            <MiniLine data={entries.map(e => e.backtest.sharpe_per_trade)} color="#c084fc" />
+          </div>
+        </div>
+      )}
+    </Panel>
   )
 }
